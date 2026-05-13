@@ -6037,5 +6037,8 @@
     "quit": "Quit",
     "show_window": "Show Window",
     "visualization": "Visualization"
+  },
+  "workspace": {
+    "title": "Workspace"
   }
 }

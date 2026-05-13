@@ -50,6 +50,7 @@ import tabs from './tabs'
 import toolPermissions from './toolPermissions'
 import translate from './translate'
 import websearch from './websearch'
+import workspace from './workspace'
 
 const logger = loggerService.withContext('Store')
 
@@ -79,7 +80,8 @@ const rootReducer = combineReducers({
   translate,
   ocr,
   note,
-  toolPermissions
+  toolPermissions,
+  workspace
 })
 
 const persistedReducer = persistReducer(

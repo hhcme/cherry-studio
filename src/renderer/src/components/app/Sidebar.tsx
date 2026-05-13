@@ -27,7 +27,8 @@ import {
   Palette,
   Settings,
   Sparkle,
-  Sun
+  Sun,
+  Workflow
 } from 'lucide-react'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -131,6 +132,7 @@ const MainMenus: FC = () => {
 
   const iconMap = {
     assistants: <MessageSquare size={18} className="icon" />,
+    workspace: <Workflow size={18} className="icon" />,
     agents: <MousePointerClick size={18} className="icon" />,
     store: <Sparkle size={18} className="icon" />,
     paintings: <Palette size={18} className="icon" />,
@@ -145,6 +147,7 @@ const MainMenus: FC = () => {
 
   const pathMap = {
     assistants: '/',
+    workspace: '/workspace',
     agents: '/agents',
     store: '/store',
     paintings: `/paintings/${defaultPaintingProvider}`,
