@@ -2,6 +2,7 @@ import { fetchChatCompletion, hasApiKey } from '@renderer/services/ApiService'
 import { getDefaultAssistant, getDefaultModel, getProviderByModel } from '@renderer/services/AssistantService'
 import { getModelById } from '@renderer/services/ModelService'
 import type { WorkspaceAgent, WorkspaceMessage } from '@renderer/store/workspace'
+import type { ApiServerConfig } from '@renderer/types/apiServer'
 import type { Chunk } from '@renderer/types/chunk'
 import { ChunkType } from '@renderer/types/chunk'
 
@@ -11,6 +12,8 @@ export interface AgentRunOptions {
   conversationHistory: WorkspaceMessage[]
   agents: WorkspaceAgent[]
   onChunk?: (text: string) => void
+  apiServer?: ApiServerConfig
+  agentMapping?: Record<string, { agentId: string; sessionId: string }>
 }
 
 export interface AgentRunResult {
@@ -19,6 +22,13 @@ export interface AgentRunResult {
 }
 
 export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
+  if (opts.agent.agentType === 'code') {
+    return runCodeAgent(opts)
+  }
+  return runChatAgent(opts)
+}
+
+async function runChatAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   const agentModel = opts.agent.modelId ? getModelById(opts.agent.modelId) : undefined
   const model = agentModel || getDefaultModel()
   if (!model) throw new Error('请先在设置中配置模型供应商和 API Key')
@@ -49,6 +59,93 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   const tasks = extractTasks(fullText, opts.agents)
 
   return { content: fullText, tasks }
+}
+
+async function runCodeAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
+  const { apiServer, agentMapping, agent } = opts
+
+  if (!apiServer?.enabled) {
+    throw new Error('编程 Agent 需要 API Server 已启用。请在设置中开启 API Server。')
+  }
+
+  const mapping = agentMapping?.[agent.id]
+  if (!mapping) {
+    throw new Error(`编程 Agent "${agent.name}" 尚未关联 Agent 会话，请先在 Agent 页面创建对应的 Agent。`)
+  }
+
+  const { agentId, sessionId } = mapping
+  const baseURL = buildBaseURL(apiServer)
+  const url = `${baseURL}/v1/agents/${agentId}/sessions/${sessionId}/messages`
+
+  const abortController = new AbortController()
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiServer.apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      'Cache-Control': 'no-cache'
+    },
+    body: JSON.stringify({ content: opts.userMessage }),
+    signal: abortController.signal
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '')
+    throw new Error(errorText || `编程 Agent 请求失败: ${response.status}`)
+  }
+
+  if (!response.body) {
+    throw new Error('编程 Agent 响应流为空')
+  }
+
+  let fullText = ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value, { stream: true })
+      const lines = chunk.split('\n')
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim()
+          if (!data || data === '[DONE]') continue
+
+          try {
+            const parsed = JSON.parse(data)
+            if (parsed.type === 'text-delta' && parsed.text) {
+              fullText += parsed.text
+              opts.onChunk?.(fullText)
+            } else if (parsed.type === 'text' && parsed.text) {
+              fullText = parsed.text
+              opts.onChunk?.(fullText)
+            }
+          } catch {
+            // skip malformed SSE lines
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const tasks = extractTasks(fullText, opts.agents)
+
+  return { content: fullText, tasks }
+}
+
+function buildBaseURL(apiServer: ApiServerConfig): string {
+  const hasProtocol = apiServer.host.startsWith('http://') || apiServer.host.startsWith('https://')
+  const baseHost = hasProtocol ? apiServer.host : `http://${apiServer.host}`
+  const portSegment = apiServer.port ? `:${apiServer.port}` : ''
+  return `${baseHost}${portSegment}`
 }
 
 function buildDefaultPrompt(agent: WorkspaceAgent, allAgents: WorkspaceAgent[]): string {
@@ -82,7 +179,7 @@ function buildMessages(opts: AgentRunOptions) {
   for (const msg of opts.conversationHistory.slice(-20)) {
     if (msg.role === 'user') {
       messages.push({ role: 'user', content: msg.content })
-    } else {
+    } else if (msg.role === 'agent') {
       const agent = opts.agents.find((a) => a.id === msg.agentId)
       messages.push({ role: 'assistant', content: `[${agent?.name || 'Agent'}] ${msg.content}` })
     }

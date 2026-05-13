@@ -6037,5 +6037,8 @@
     "quit": "Выйти",
     "show_window": "Показать окно",
     "visualization": "Визуализация"
+  },
+  "workspace": {
+    "title": "[to be translated]:Workspace"
   }
 }

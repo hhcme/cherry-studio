@@ -1,6 +1,8 @@
+import { useSettings } from '@renderer/hooks/useSettings'
 import { runAgent } from '@renderer/services/workspace/agentRunner'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
-import { addMessage, clearMessages, createTask, setAgentRunning } from '@renderer/store/workspace'
+import type { WorkspaceMessage } from '@renderer/store/workspace'
+import { addMessage, clearMessages, createTask, setAgentAction, setAgentRunning } from '@renderer/store/workspace'
 import type { MenuProps } from 'antd'
 import { Dropdown } from 'antd'
 import { motion } from 'framer-motion'
@@ -8,6 +10,8 @@ import { AlertTriangle, Download, Loader2, MoreVertical, Send, Trash2 } from 'lu
 import type { FC } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { styled } from 'styled-components'
+
+import WorkspaceMarkdown from './WorkspaceMarkdown'
 
 const AGENT_COLOR_MAP: Record<string, string> = {
   blue: '#1677ff',
@@ -23,24 +27,46 @@ const AGENT_COLOR_MAP: Record<string, string> = {
 const MultiAgentChat: FC = () => {
   const dispatch = useAppDispatch()
   const { conversations, activeConversationId, agents } = useAppSelector((s) => s.workspace)
+  const agentRunning = useAppSelector((s) => s.workspace.agentRunning)
+  const agentAction = useAppSelector((s) => s.workspace.agentAction)
+  const { apiServer } = useSettings()
   const [input, setInput] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [, setStreamingId] = useState<string | null>(null)
   const [visibleCount, setVisibleCount] = useState(50)
+  const [replyTo, setReplyTo] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const messagesAreaRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef(false)
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
   const messages = activeConversation?.messages || []
-  const convAgents = agents.filter((a) => activeConversation?.agentIds.includes(a.id))
+  const convAgents = agents.filter((a) => a.status === 'active' && activeConversation?.agentIds.includes(a.id))
 
-  const isRunning = Object.values(useAppSelector((s) => s.workspace.agentRunning)).some(Boolean)
-  const agentRunning = useAppSelector((s) => s.workspace.agentRunning)
+  const isRunning = Object.values(agentRunning).some(Boolean)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages.length])
+
+  const addEventMessage = useCallback(
+    (text: string) => {
+      if (!activeConversationId) return
+      dispatch(
+        addMessage({
+          conversationId: activeConversationId,
+          message: {
+            id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            agentId: 'system',
+            role: 'event',
+            content: text,
+            messageType: 'text',
+            createdAt: new Date().toISOString()
+          }
+        })
+      )
+    },
+    [activeConversationId, dispatch]
+  )
 
   const executeAgentChain = useCallback(
     async (userText: string) => {
@@ -50,11 +76,11 @@ const MultiAgentChat: FC = () => {
       const pmAgent = convAgents.find((a) => a.isMain) || convAgents[0]
       if (!pmAgent) return
 
-      const subAgents = convAgents.filter((a) => a.id !== pmAgent.id)
+      const subAgents = convAgents.filter((a) => a.id !== pmAgent.id && a.agentType === 'chat')
 
       try {
-        // Step 1: PM Agent responds
         dispatch(setAgentRunning({ agentId: pmAgent.id, running: true }))
+        dispatch(setAgentAction({ agentId: pmAgent.id, action: '正在分析需求...' }))
         setError(null)
 
         const pmMsgId = `msg-${Date.now()}-pm`
@@ -68,7 +94,8 @@ const MultiAgentChat: FC = () => {
               role: 'agent',
               content: '',
               messageType: 'text',
-              createdAt: new Date().toISOString()
+              createdAt: new Date().toISOString(),
+              replyTo: replyTo || undefined
             }
           })
         )
@@ -78,6 +105,7 @@ const MultiAgentChat: FC = () => {
           userMessage: userText,
           conversationHistory: activeConversation?.messages || [],
           agents: convAgents,
+          apiServer,
           onChunk: (text) => {
             if (abortRef.current) return
             dispatch({
@@ -90,18 +118,19 @@ const MultiAgentChat: FC = () => {
         dispatch(setAgentRunning({ agentId: pmAgent.id, running: false }))
         setStreamingId(null)
 
-        // Extract tasks from PM response
         if (pmResult.tasks && pmResult.tasks.length > 0) {
           for (const t of pmResult.tasks) {
             dispatch(createTask({ ...t, conversationId: activeConversationId }))
           }
+          addEventMessage(`PM 创建了 ${pmResult.tasks.length} 个任务`)
         }
 
-        // Step 2: Sub-agents respond serially
         for (const subAgent of subAgents) {
           if (abortRef.current) break
 
           dispatch(setAgentRunning({ agentId: subAgent.id, running: true }))
+          dispatch(setAgentAction({ agentId: subAgent.id, action: '正在执行任务...' }))
+          addEventMessage(`${subAgent.name} 开始工作`)
 
           const subMsgId = `msg-${Date.now()}-${subAgent.id}`
           setStreamingId(subMsgId)
@@ -134,26 +163,31 @@ const MultiAgentChat: FC = () => {
               }
             ],
             agents: convAgents,
+            apiServer,
             onChunk: (text) => {
               if (abortRef.current) return
               dispatch({
                 type: 'workspace/updateMessageContent',
-                payload: { conversationId: activeConversationId, messageId: subMsgId, content: text }
+                payload: {
+                  conversationId: activeConversationId,
+                  messageId: subMsgId,
+                  content: text
+                }
               })
             }
           })
 
           dispatch(setAgentRunning({ agentId: subAgent.id, running: false }))
           setStreamingId(null)
+          addEventMessage(`${subAgent.name} 完成了任务`)
         }
       } catch (err: any) {
         setError(err.message || '调用失败，请检查 API 配置')
-        dispatch(setAgentRunning({ agentId: pmAgent.id, running: false }))
         convAgents.forEach((a) => dispatch(setAgentRunning({ agentId: a.id, running: false })))
         setStreamingId(null)
       }
     },
-    [activeConversationId, convAgents, activeConversation, dispatch]
+    [activeConversationId, convAgents, activeConversation, dispatch, replyTo, addEventMessage, apiServer]
   )
 
   const handleSend = () => {
@@ -175,18 +209,9 @@ const MultiAgentChat: FC = () => {
     )
 
     setInput('')
+    setReplyTo(null)
     setVisibleCount(50)
     void executeAgentChain(text)
-  }
-
-  if (!activeConversation) {
-    return (
-      <EmptyState>
-        <EmptyIcon>WS</EmptyIcon>
-        <EmptyTitle>多 Agent 协作工作台</EmptyTitle>
-        <EmptyDesc>从左侧选择或新建一个对话开始。</EmptyDesc>
-      </EmptyState>
-    )
   }
 
   const handleExportMarkdown = () => {
@@ -194,7 +219,7 @@ const MultiAgentChat: FC = () => {
     const lines = [`# ${activeConversation.name}`, '']
     for (const msg of messages) {
       const agent = agents.find((a) => a.id === msg.agentId)
-      const sender = msg.role === 'user' ? '用户' : agent?.name || 'Agent'
+      const sender = msg.role === 'user' ? '用户' : msg.role === 'event' ? '系统' : agent?.name || 'Agent'
       lines.push(`## ${sender} (${formatTime(msg.createdAt)})`, '', msg.content, '')
     }
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
@@ -213,7 +238,11 @@ const MultiAgentChat: FC = () => {
       agents: activeConversation.agentIds.map((id) => agents.find((a) => a.id === id)?.name),
       messages: messages.map((m) => {
         const agent = agents.find((a) => a.id === m.agentId)
-        return { sender: m.role === 'user' ? '用户' : agent?.name, content: m.content, time: m.createdAt }
+        return {
+          sender: m.role === 'user' ? '用户' : m.role === 'event' ? '系统' : agent?.name,
+          content: m.content,
+          time: m.createdAt
+        }
       })
     }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
@@ -238,6 +267,18 @@ const MultiAgentChat: FC = () => {
     }
   ]
 
+  if (!activeConversation) {
+    return (
+      <EmptyState>
+        <EmptyIcon>WS</EmptyIcon>
+        <EmptyTitle>多 Agent 协作工作台</EmptyTitle>
+        <EmptyDesc>从左侧选择或新建一个对话开始。</EmptyDesc>
+      </EmptyState>
+    )
+  }
+
+  const visibleMessages = messages.slice(-visibleCount)
+
   return (
     <Container>
       <ChatHeader>
@@ -245,14 +286,14 @@ const MultiAgentChat: FC = () => {
           <ChatName>{activeConversation.name}</ChatName>
           {convAgents.map((a) => {
             const running = agentRunning[a.id]
+            const action = agentAction[a.id]
             return (
-              <AgentAvatarSmall
-                key={a.id}
-                color={AGENT_COLOR_MAP[a.color] || '#1677ff'}
-                title={`${a.name}${running ? ' (思考中...)' : ''}`}
-                $running={running}>
-                {running ? <Loader2 size={10} className="spin" /> : a.avatar}
-              </AgentAvatarSmall>
+              <AgentStatusWrap key={a.id} title={`${a.name}${running ? ` (${action})` : ''}`}>
+                <AgentAvatarSmall color={AGENT_COLOR_MAP[a.color] || '#1677ff'} $running={running}>
+                  {running ? <Loader2 size={10} className="spin" /> : a.avatar}
+                </AgentAvatarSmall>
+                {running && action && <AgentActionLabel>{action}</AgentActionLabel>}
+              </AgentStatusWrap>
             )
           })}
         </HeaderLeft>
@@ -274,7 +315,7 @@ const MultiAgentChat: FC = () => {
         </ErrorBar>
       )}
 
-      <MessagesArea ref={messagesAreaRef}>
+      <MessagesArea>
         {messages.length === 0 ? (
           <EmptyState>
             <EmptyIcon>WS</EmptyIcon>
@@ -288,47 +329,35 @@ const MultiAgentChat: FC = () => {
                 ↑ 加载更早消息（还有 {messages.length - visibleCount} 条）
               </LoadMoreBtn>
             )}
-            {messages.slice(-visibleCount).map((msg) => {
-              const agent = agents.find((a) => a.id === msg.agentId)
-              if (msg.role === 'user') {
-                return (
-                  <motion.div
-                    key={msg.id}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.2 }}>
-                    <UserBubble>
-                      <BubbleContent>{msg.content}</BubbleContent>
-                      <BubbleTime>{formatTime(msg.createdAt)}</BubbleTime>
-                    </UserBubble>
-                  </motion.div>
-                )
-              }
-              return (
-                <motion.div
-                  key={msg.id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.2 }}>
-                  <AgentBubble>
-                    <AgentAvatarMedium color={AGENT_COLOR_MAP[agent?.color || 'blue'] || '#1677ff'}>
-                      {agent?.avatar || '?'}
-                    </AgentAvatarMedium>
-                    <BubbleBody>
-                      <AgentName>{agent?.name || 'Unknown'}</AgentName>
-                      <AgentContent>{msg.content}</AgentContent>
-                      <BubbleTime>{formatTime(msg.createdAt)}</BubbleTime>
-                    </BubbleBody>
-                  </AgentBubble>
-                </motion.div>
-              )
-            })}
+            {visibleMessages.map((msg) => (
+              <MessageBubble
+                key={msg.id}
+                msg={msg}
+                agents={agents}
+                allMessages={messages}
+                onReply={() => setReplyTo(msg.id)}
+              />
+            ))}
             <div ref={messagesEndRef} />
           </MessageList>
         )}
       </MessagesArea>
 
       <InputArea>
+        {replyTo && (
+          <ReplyBar>
+            <span>
+              回复: {(() => {
+                const orig = messages.find((m) => m.id === replyTo)
+                const agent = agents.find((a) => a.id === orig?.agentId)
+                return orig
+                  ? `${agent?.name || '你'}: ${orig.content.slice(0, 40)}${orig.content.length > 40 ? '...' : ''}`
+                  : ''
+              })()}
+            </span>
+            <ReplyClose onClick={() => setReplyTo(null)}>✕</ReplyClose>
+          </ReplyBar>
+        )}
         <InputWrapper>
           <StyledInput
             value={input}
@@ -351,6 +380,74 @@ const MultiAgentChat: FC = () => {
   )
 }
 
+const MessageBubble: FC<{
+  msg: WorkspaceMessage
+  agents: { id: string; name: string; avatar: string; color: string; agentType: string }[]
+  allMessages: WorkspaceMessage[]
+  onReply: () => void
+}> = ({ msg, agents, allMessages, onReply }) => {
+  const agent = agents.find((a) => a.id === msg.agentId)
+  const replyMsg = msg.replyTo ? allMessages.find((m) => m.id === msg.replyTo) : null
+  const replyAgent = replyMsg ? agents.find((a) => a.id === replyMsg.agentId) : null
+
+  if (msg.role === 'event') {
+    return (
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
+        <EventMessage>{msg.content}</EventMessage>
+      </motion.div>
+    )
+  }
+
+  if (msg.role === 'user') {
+    return (
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>
+        <UserBubble>
+          {replyMsg && (
+            <QuotePreview>
+              回复 {replyAgent?.name || '你'}: {replyMsg.content.slice(0, 60)}
+              {replyMsg.content.length > 60 ? '...' : ''}
+            </QuotePreview>
+          )}
+          <BubbleContent>{msg.content}</BubbleContent>
+          <BubbleFooter>
+            <BubbleTime>{formatTime(msg.createdAt)}</BubbleTime>
+            <ReplyBtn onClick={onReply}>回复</ReplyBtn>
+          </BubbleFooter>
+        </UserBubble>
+      </motion.div>
+    )
+  }
+
+  return (
+    <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.2 }}>
+      <AgentBubble>
+        <AgentAvatarMedium color={AGENT_COLOR_MAP[agent?.color || 'blue'] || '#1677ff'}>
+          {agent?.avatar || '?'}
+        </AgentAvatarMedium>
+        <BubbleBody>
+          <AgentNameRow>
+            <AgentName>{agent?.name || 'Unknown'}</AgentName>
+            {agent?.agentType === 'code' && <CodeTag>Code</CodeTag>}
+          </AgentNameRow>
+          {replyMsg && (
+            <QuotePreview>
+              回复 {replyAgent?.name || '你'}: {replyMsg.content.slice(0, 60)}
+              {replyMsg.content.length > 60 ? '...' : ''}
+            </QuotePreview>
+          )}
+          <AgentContent>
+            <WorkspaceMarkdown content={msg.content} />
+          </AgentContent>
+          <BubbleFooter>
+            <BubbleTime>{formatTime(msg.createdAt)}</BubbleTime>
+            <ReplyBtn onClick={onReply}>回复</ReplyBtn>
+          </BubbleFooter>
+        </BubbleBody>
+      </AgentBubble>
+    </motion.div>
+  )
+}
+
 function formatTime(isoStr: string): string {
   if (!isoStr) return ''
   return new Date(isoStr).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
@@ -361,18 +458,13 @@ const Container = styled.div`
   flex-direction: column;
   height: 100%;
 
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   .spin {
     animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
   }
 `
 
@@ -390,6 +482,9 @@ const HeaderLeft = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 `
 
 const HeaderRight = styled.div`
@@ -398,6 +493,52 @@ const HeaderRight = styled.div`
   gap: 8px;
   font-size: 11px;
   color: var(--color-text-secondary);
+  flex-shrink: 0;
+`
+
+const ChatName = styled.div`
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+`
+
+const AgentStatusWrap = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+`
+
+const AgentAvatarSmall = styled.div<{ color: string; $running?: boolean }>`
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: ${({ color }) => color};
+  background: ${({ color }) => color}18;
+  flex-shrink: 0;
+  ${({ $running }) => $running && 'animation: pulse 1.5s ease-in-out infinite;'}
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+`
+
+const AgentActionLabel = styled.span`
+  font-size: 10px;
+  color: var(--color-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100px;
 `
 
 const MoreBtn = styled.button`
@@ -414,26 +555,6 @@ const MoreBtn = styled.button`
   &:hover {
     background: var(--color-hover);
   }
-`
-
-const ChatName = styled.div`
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-text);
-`
-
-const AgentAvatarSmall = styled.div<{ color: string; $running?: boolean }>`
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  font-weight: 600;
-  color: ${({ color }) => color};
-  background: ${({ color }) => color}18;
-  ${({ $running }) => $running && 'animation: pulse 1.5s ease-in-out infinite;'}
 `
 
 const ErrorBar = styled.div`
@@ -485,6 +606,17 @@ const MessageList = styled.div`
   gap: 16px;
 `
 
+const EventMessage = styled.div`
+  text-align: center;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  padding: 4px 16px;
+  background: var(--color-background-soft);
+  border-radius: 12px;
+  margin: 0 auto;
+  max-width: 300px;
+`
+
 const UserBubble = styled.div`
   display: flex;
   flex-direction: column;
@@ -493,26 +625,10 @@ const UserBubble = styled.div`
   margin-left: auto;
 `
 
-const BubbleContent = styled.div`
-  background: var(--color-primary-background);
-  color: var(--color-text);
-  padding: 10px 14px;
-  border-radius: 16px 16px 4px 16px;
-  font-size: 13px;
-  line-height: 1.5;
-`
-
-const BubbleTime = styled.div`
-  font-size: 10px;
-  color: var(--color-text-secondary);
-  margin-top: 4px;
-  opacity: 0.6;
-`
-
 const AgentBubble = styled.div`
   display: flex;
   gap: 10px;
-  max-width: 70%;
+  max-width: 80%;
 `
 
 const AgentAvatarMedium = styled.div<{ color: string }>`
@@ -534,10 +650,48 @@ const BubbleBody = styled.div`
   min-width: 0;
 `
 
+const AgentNameRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+`
+
 const AgentName = styled.div`
   font-size: 12px;
   color: var(--color-text-secondary);
+`
+
+const CodeTag = styled.span`
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  color: var(--color-primary);
+  font-weight: 500;
+`
+
+const QuotePreview = styled.div`
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  padding: 4px 8px;
   margin-bottom: 4px;
+  border-left: 2px solid var(--color-primary);
+  background: var(--color-background-soft);
+  border-radius: 0 4px 4px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+`
+
+const BubbleContent = styled.div`
+  background: var(--color-primary-background);
+  color: var(--color-text);
+  padding: 10px 14px;
+  border-radius: 16px 16px 4px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
 `
 
 const AgentContent = styled.div`
@@ -545,8 +699,65 @@ const AgentContent = styled.div`
   color: var(--color-text);
   padding: 10px 14px;
   border-radius: 16px 16px 16px 4px;
-  font-size: 13px;
-  line-height: 1.5;
+`
+
+const BubbleFooter = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  justify-content: flex-end;
+`
+
+const BubbleTime = styled.div`
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  opacity: 0.6;
+`
+
+const ReplyBtn = styled.button`
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 0.2s;
+  &:hover {
+    color: var(--color-primary);
+  }
+  ${AgentBubble}:hover &, ${UserBubble}:hover & {
+    opacity: 1;
+  }
+`
+
+const ReplyBar = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-bottom: 4px;
+  background: var(--color-background-soft);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  span {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+`
+
+const ReplyClose = styled.button`
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  flex-shrink: 0;
 `
 
 const InputArea = styled.div`

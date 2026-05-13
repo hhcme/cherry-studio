@@ -1,10 +1,12 @@
 import { CheckOutlined, DatabaseOutlined, DeleteOutlined, UndoOutlined } from '@ant-design/icons'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
+import type { TaskPriority } from '@renderer/store/workspace'
 import {
   cycleTaskStatus,
   deleteTask,
   setConversationKnowledgeBase,
   setRightPanel,
+  updateTaskPriority,
   updateTaskStatus
 } from '@renderer/store/workspace'
 import { Select, Tooltip } from 'antd'
@@ -24,6 +26,12 @@ const AGENT_COLOR_MAP: Record<string, string> = {
   rose: '#f5222d'
 }
 
+const PRIORITY_CONFIG: Record<TaskPriority, { label: string; color: string }> = {
+  normal: { label: '普通', color: 'var(--color-text-secondary)' },
+  high: { label: '优先', color: '#faad14' },
+  urgent: { label: '紧急', color: '#ff4d4f' }
+}
+
 const panels = [
   { id: 'tasks', icon: ListChecks, label: '任务' },
   { id: 'agents', icon: Users, label: 'Agent' },
@@ -36,6 +44,7 @@ const panels = [
 const columns = [
   { key: 'in_progress', label: '进行中', color: '#1677ff' },
   { key: 'queued', label: '队列中', color: 'var(--color-text-secondary)' },
+  { key: 'pending_review', label: '待审核', color: '#faad14' },
   { key: 'blocked', label: '阻塞/等待', color: '#faad14' },
   { key: 'paused', label: '已暂停', color: 'var(--color-text-secondary)' },
   { key: 'completed', label: '已完成', color: '#52c41a' }
@@ -102,10 +111,15 @@ const TaskBoard: FC = () => {
   return (
     <div>
       <BoardHeader>
-        <span>任务板 ({convTasks.filter((t) => t.status !== 'completed').length})</span>
+        <span>任务板 ({convTasks.filter((t) => t.status !== 'completed').length} 活跃)</span>
       </BoardHeader>
       {columns.map((col) => {
-        const colTasks = convTasks.filter((t) => t.status === col.key)
+        const colTasks = convTasks
+          .filter((t) => t.status === col.key)
+          .sort((a, b) => {
+            const p = { urgent: 0, high: 1, normal: 2 }
+            return (p[a.priority] ?? 2) - (p[b.priority] ?? 2)
+          })
         return (
           <ColumnSection key={col.key}>
             <ColumnLabel style={{ color: col.color }}>
@@ -113,6 +127,7 @@ const TaskBoard: FC = () => {
             </ColumnLabel>
             {colTasks.map((task) => {
               const agent = agents.find((a) => a.id === task.assignedTo)
+              const pri = PRIORITY_CONFIG[task.priority]
               return (
                 <TaskCard key={task.id}>
                   <TaskHeader>
@@ -121,39 +136,55 @@ const TaskBoard: FC = () => {
                         <CheckCircle size={14} color="#52c41a" />
                       ) : task.status === 'in_progress' ? (
                         <Clock size={14} color="#1677ff" />
-                      ) : task.status === 'blocked' ? (
+                      ) : task.status === 'blocked' || task.status === 'pending_review' ? (
                         <Pause size={14} color="#faad14" />
                       ) : (
                         <Circle size={14} />
                       )}
                     </StatusIcon>
                     <TaskTitle $done={task.status === 'completed'}>{task.title}</TaskTitle>
-                    <TaskActions>
-                      {task.status === 'completed' ? (
-                        <ActionBtn
-                          onClick={() => dispatch(updateTaskStatus({ taskId: task.id, status: 'queued' }))}
-                          title="重新打开">
-                          <UndoOutlined style={{ fontSize: 12 }} />
-                        </ActionBtn>
-                      ) : (
-                        <ActionBtn
-                          onClick={() => dispatch(updateTaskStatus({ taskId: task.id, status: 'completed' }))}
-                          title="完成">
-                          <CheckOutlined style={{ fontSize: 12 }} />
-                        </ActionBtn>
-                      )}
-                      <ActionBtn $danger onClick={() => dispatch(deleteTask(task.id))} title="删除">
-                        <DeleteOutlined style={{ fontSize: 12 }} />
-                      </ActionBtn>
-                    </TaskActions>
+                    <PriorityTag
+                      $priority={task.priority}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        const next: TaskPriority =
+                          task.priority === 'normal' ? 'high' : task.priority === 'high' ? 'urgent' : 'normal'
+                        dispatch(updateTaskPriority({ taskId: task.id, priority: next }))
+                      }}
+                      title="点击切换优先级">
+                      {pri.label}
+                    </PriorityTag>
                   </TaskHeader>
                   {task.description && <TaskDesc>{task.description}</TaskDesc>}
+                  {task.dependsOn.length > 0 && (
+                    <DepInfo>
+                      依赖: {task.dependsOn.map((d) => tasks.find((t) => t.id === d)?.title || d).join(', ')}
+                    </DepInfo>
+                  )}
                   {agent && (
                     <TaskFooter>
                       <MiniAvatar color={AGENT_COLOR_MAP[agent.color] || '#1677ff'}>{agent.avatar}</MiniAvatar>
                       <span style={{ fontSize: 10, color: 'var(--color-text-secondary)' }}>{agent.name}</span>
                     </TaskFooter>
                   )}
+                  <TaskActions>
+                    {task.status === 'completed' ? (
+                      <ActionBtn
+                        onClick={() => dispatch(updateTaskStatus({ taskId: task.id, status: 'queued' }))}
+                        title="重新打开">
+                        <UndoOutlined style={{ fontSize: 12 }} />
+                      </ActionBtn>
+                    ) : (
+                      <ActionBtn
+                        onClick={() => dispatch(updateTaskStatus({ taskId: task.id, status: 'completed' }))}
+                        title="完成">
+                        <CheckOutlined style={{ fontSize: 12 }} />
+                      </ActionBtn>
+                    )}
+                    <ActionBtn $danger onClick={() => dispatch(deleteTask(task.id))} title="删除">
+                      <DeleteOutlined style={{ fontSize: 12 }} />
+                    </ActionBtn>
+                  </TaskActions>
                 </TaskCard>
               )
             })}
@@ -180,14 +211,20 @@ const AgentTeamPanel: FC = () => {
       </BoardHeader>
       {agents.map((agent) => (
         <AgentCard key={agent.id}>
-          <AgentAvatarLarge color={AGENT_COLOR_MAP[agent.color] || '#1677ff'}>{agent.avatar}</AgentAvatarLarge>
+          <AgentAvatarLarge color={AGENT_COLOR_MAP[agent.color] || '#1677ff'} $paused={agent.status === 'paused'}>
+            {agent.avatar}
+          </AgentAvatarLarge>
           <AgentCardInfo>
             <AgentCardName>
               {agent.name}
               {agent.isMain && <MainTag>主 Agent</MainTag>}
+              <TypeTag $type={agent.agentType}>{agent.agentType === 'code' ? 'Code' : 'Chat'}</TypeTag>
+              {agent.status === 'paused' && <PausedTag>已暂停</PausedTag>}
             </AgentCardName>
             <AgentCardRole>{agent.role}</AgentCardRole>
-            <AgentModelTag>{agent.modelId ? `模型: ${agent.modelId.split('/').pop()}` : '默认模型'}</AgentModelTag>
+            <AgentModelTag>
+              {agent.modelId ? `模型: ${agent.modelId.split('/').pop()}` : '默认模型'} | 权限: {agent.permissionMode}
+            </AgentModelTag>
           </AgentCardInfo>
         </AgentCard>
       ))}
@@ -201,10 +238,7 @@ const KnowledgePanel: FC = () => {
   const knowledgeBases = useAppSelector((s) => s.knowledge.bases)
   const activeConv = conversations.find((c) => c.id === activeConversationId)
 
-  const knowledgeOptions = knowledgeBases.map((kb) => ({
-    label: kb.name,
-    value: kb.id
-  }))
+  const knowledgeOptions = knowledgeBases.map((kb) => ({ label: kb.name, value: kb.id }))
 
   return (
     <div>
@@ -358,6 +392,7 @@ const TaskCard = styled.div`
   padding: 8px;
   margin-bottom: 6px;
   cursor: pointer;
+  position: relative;
   &:hover {
     border-color: var(--color-primary);
   }
@@ -390,12 +425,32 @@ const TaskTitle = styled.div<{ $done: boolean }>`
   text-overflow: ellipsis;
 `
 
+const PriorityTag = styled.span<{ $priority: TaskPriority }>`
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  cursor: pointer;
+  font-weight: 500;
+  color: ${({ $priority }) => PRIORITY_CONFIG[$priority].color};
+  background: color-mix(in srgb, ${({ $priority }) => PRIORITY_CONFIG[$priority].color} 12%, transparent);
+  &:hover {
+    opacity: 0.8;
+  }
+`
+
 const TaskActions = styled.div`
   display: flex;
   gap: 2px;
   flex-shrink: 0;
+  position: absolute;
+  top: 6px;
+  right: 6px;
   opacity: 0;
   transition: opacity 0.2s;
+  background: var(--color-background);
+  padding: 2px;
+  border-radius: 4px;
   ${TaskCard}:hover & {
     opacity: 1;
   }
@@ -425,6 +480,17 @@ const TaskDesc = styled.div`
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+`
+
+const DepInfo = styled.div`
+  font-size: 10px;
+  color: var(--color-primary);
+  margin-top: 2px;
+  padding-left: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.7;
 `
 
 const TaskFooter = styled.div`
@@ -478,7 +544,7 @@ const AgentCard = styled.div`
   }
 `
 
-const AgentAvatarLarge = styled.div<{ color: string }>`
+const AgentAvatarLarge = styled.div<{ color: string; $paused?: boolean }>`
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -490,6 +556,7 @@ const AgentAvatarLarge = styled.div<{ color: string }>`
   color: ${({ color }) => color};
   background: ${({ color }) => color}18;
   flex-shrink: 0;
+  ${({ $paused }) => $paused && 'opacity: 0.4; filter: grayscale(1);'}
 `
 
 const AgentCardInfo = styled.div`
@@ -504,6 +571,7 @@ const AgentCardName = styled.div`
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 `
 
 const MainTag = styled.span`
@@ -512,6 +580,24 @@ const MainTag = styled.span`
   border-radius: 10px;
   background: color-mix(in srgb, var(--color-primary) 10%, transparent);
   color: var(--color-primary);
+`
+
+const TypeTag = styled.span<{ $type: string }>`
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  ${({ $type }) =>
+    $type === 'code'
+      ? 'background: color-mix(in srgb, var(--color-primary) 12%, transparent); color: var(--color-primary);'
+      : 'background: var(--color-background-soft); color: var(--color-text-secondary);'}
+`
+
+const PausedTag = styled.span`
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, #999 12%, transparent);
+  color: #999;
 `
 
 const AgentCardRole = styled.div`

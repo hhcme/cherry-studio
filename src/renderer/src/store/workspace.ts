@@ -1,5 +1,10 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
 
+export type AgentType = 'chat' | 'code'
+export type AgentStatus = 'active' | 'paused'
+export type TaskPriority = 'normal' | 'high' | 'urgent'
+export type PermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
+
 export interface WorkspaceAgent {
   id: string
   name: string
@@ -9,6 +14,10 @@ export interface WorkspaceAgent {
   isMain: boolean
   modelId?: string
   systemPrompt?: string
+  agentType: AgentType
+  status: AgentStatus
+  permissionMode: PermissionMode
+  workDir?: string
 }
 
 export interface WorkspaceConversation {
@@ -23,21 +32,24 @@ export interface WorkspaceConversation {
 export interface WorkspaceMessage {
   id: string
   agentId: string
-  role: 'user' | 'agent'
+  role: 'user' | 'agent' | 'event'
   content: string
-  messageType: 'text' | 'task_create' | 'task_update'
+  messageType: 'text' | 'task_create' | 'task_update' | 'tool_call' | 'tool_result'
   createdAt: string
+  replyTo?: string
 }
 
-export type TaskStatus = 'queued' | 'in_progress' | 'blocked' | 'paused' | 'completed'
+export type TaskStatus = 'queued' | 'in_progress' | 'blocked' | 'paused' | 'pending_review' | 'completed'
 
 export interface WorkspaceTask {
   id: string
   title: string
   description: string
   status: TaskStatus
+  priority: TaskPriority
   conversationId: string
   assignedTo: string
+  dependsOn: string[]
   createdAt: string
 }
 
@@ -49,6 +61,7 @@ export interface WorkspaceState {
   rightPanel: string | null
   leftPanelCollapsed: boolean
   agentRunning: Record<string, boolean>
+  agentAction: Record<string, string>
 }
 
 const AGENT_COLORS = ['blue', 'purple', 'emerald', 'orange', 'pink', 'cyan', 'amber', 'rose']
@@ -62,6 +75,9 @@ const initialState: WorkspaceState = {
       avatar: 'P',
       color: 'blue',
       isMain: true,
+      agentType: 'chat',
+      status: 'active',
+      permissionMode: 'default',
       systemPrompt:
         '你是 PM Agent（产品经理），负责协调项目中的 Agent 团队完成用户需求。你的职责：1. 理解用户需求，将其分解为可执行的任务 2. 将任务分发给合适的 Agent 3. 审核产出，处理冲突。回复格式：使用 Markdown。'
     },
@@ -72,6 +88,9 @@ const initialState: WorkspaceState = {
       avatar: 'D',
       color: 'emerald',
       isMain: false,
+      agentType: 'code',
+      status: 'active',
+      permissionMode: 'default',
       systemPrompt: '你是 Dev Agent（后端开发），负责根据 PM 分配的任务编写代码和技术方案。'
     },
     {
@@ -81,6 +100,9 @@ const initialState: WorkspaceState = {
       avatar: 'U',
       color: 'purple',
       isMain: false,
+      agentType: 'chat',
+      status: 'active',
+      permissionMode: 'default',
       systemPrompt: '你是 Design Agent（设计师），负责 UI 设计和用户体验方案。'
     }
   ],
@@ -101,46 +123,14 @@ const initialState: WorkspaceState = {
     }
   ],
   activeConversationId: 'conv-1',
-  tasks: [
-    {
-      id: 'task-1',
-      title: '设计数据库表结构',
-      description: '用户表、订单表、商品表',
-      status: 'in_progress',
-      conversationId: 'conv-1',
-      assignedTo: 'dev-1',
-      createdAt: new Date().toISOString()
-    },
-    {
-      id: 'task-2',
-      title: '绘制首页原型图',
-      description: '包含导航、banner、商品列表',
-      status: 'queued',
-      conversationId: 'conv-1',
-      assignedTo: 'design-1',
-      createdAt: new Date().toISOString()
-    },
-    {
-      id: 'task-3',
-      title: '编写 API 接口文档',
-      description: 'RESTful API 规范',
-      status: 'completed',
-      conversationId: 'conv-2',
-      assignedTo: 'pm-1',
-      createdAt: new Date().toISOString()
-    }
-  ],
+  tasks: [],
   rightPanel: null,
   leftPanelCollapsed: false,
-  agentRunning: {}
+  agentRunning: {},
+  agentAction: {}
 }
 
-const STATUS_ORDER: TaskStatus[] = ['queued', 'in_progress', 'blocked', 'paused', 'completed']
-
-function getNextStatus(current: TaskStatus): TaskStatus {
-  const idx = STATUS_ORDER.indexOf(current)
-  return STATUS_ORDER[(idx + 1) % STATUS_ORDER.length]
-}
+const STATUS_ORDER: TaskStatus[] = ['queued', 'in_progress', 'blocked', 'paused', 'pending_review', 'completed']
 
 const workspaceSlice = createSlice({
   name: 'workspace',
@@ -180,7 +170,17 @@ const workspaceSlice = createSlice({
       if (conv) conv.messages.push(action.payload.message)
     },
 
-    addAgent(state, action: PayloadAction<{ name: string; role: string; isMain: boolean }>) {
+    addAgent(
+      state,
+      action: PayloadAction<{
+        name: string
+        role: string
+        isMain: boolean
+        agentType: AgentType
+        systemPrompt?: string
+        modelId?: string
+      }>
+    ) {
       const id = `${action.payload.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`
       const color = AGENT_COLORS[Math.floor(Math.random() * AGENT_COLORS.length)]
       state.agents.push({
@@ -189,7 +189,12 @@ const workspaceSlice = createSlice({
         role: action.payload.role,
         avatar: action.payload.name.charAt(0).toUpperCase(),
         color,
-        isMain: action.payload.isMain
+        isMain: action.payload.isMain,
+        agentType: action.payload.agentType,
+        status: 'active',
+        permissionMode: 'default',
+        systemPrompt: action.payload.systemPrompt,
+        modelId: action.payload.modelId
       })
     },
 
@@ -200,17 +205,67 @@ const workspaceSlice = createSlice({
       })
     },
 
+    cloneAgent(state, action: PayloadAction<string>) {
+      const src = state.agents.find((a) => a.id === action.payload)
+      if (!src) return
+      const id = `${src.name.toLowerCase().replace(/\s+/g, '-')}-clone-${Date.now()}`
+      state.agents.push({
+        ...src,
+        id,
+        name: `${src.name} (副本)`,
+        isMain: false
+      })
+    },
+
+    updateAgent(state, action: PayloadAction<{ id: string; updates: Partial<WorkspaceAgent> }>) {
+      const agent = state.agents.find((a) => a.id === action.payload.id)
+      if (agent) Object.assign(agent, action.payload.updates)
+    },
+
+    pauseAgent(state, action: PayloadAction<string>) {
+      const agent = state.agents.find((a) => a.id === action.payload)
+      if (agent) agent.status = 'paused'
+    },
+
+    resumeAgent(state, action: PayloadAction<string>) {
+      const agent = state.agents.find((a) => a.id === action.payload)
+      if (agent) agent.status = 'active'
+    },
+
+    addAgentToConversation(state, action: PayloadAction<{ conversationId: string; agentId: string }>) {
+      const conv = state.conversations.find((c) => c.id === action.payload.conversationId)
+      if (conv && !conv.agentIds.includes(action.payload.agentId)) {
+        conv.agentIds.push(action.payload.agentId)
+      }
+    },
+
+    removeAgentFromConversation(state, action: PayloadAction<{ conversationId: string; agentId: string }>) {
+      const conv = state.conversations.find((c) => c.id === action.payload.conversationId)
+      if (conv) {
+        conv.agentIds = conv.agentIds.filter((id) => id !== action.payload.agentId)
+      }
+    },
+
     createTask(
       state,
-      action: PayloadAction<{ title: string; description: string; assignedTo: string; conversationId: string }>
+      action: PayloadAction<{
+        title: string
+        description: string
+        assignedTo: string
+        conversationId: string
+        priority?: TaskPriority
+        dependsOn?: string[]
+      }>
     ) {
       state.tasks.push({
         id: `task-${Date.now()}`,
         title: action.payload.title,
         description: action.payload.description,
         status: 'queued',
+        priority: action.payload.priority || 'normal',
         conversationId: action.payload.conversationId,
         assignedTo: action.payload.assignedTo,
+        dependsOn: action.payload.dependsOn || [],
         createdAt: new Date().toISOString()
       })
     },
@@ -220,9 +275,14 @@ const workspaceSlice = createSlice({
       if (task) task.status = action.payload.status
     },
 
+    updateTaskPriority(state, action: PayloadAction<{ taskId: string; priority: TaskPriority }>) {
+      const task = state.tasks.find((t) => t.id === action.payload.taskId)
+      if (task) task.priority = action.payload.priority
+    },
+
     cycleTaskStatus(state, action: PayloadAction<string>) {
       const task = state.tasks.find((t) => t.id === action.payload)
-      if (task) task.status = getNextStatus(task.status)
+      if (task) task.status = STATUS_ORDER[(STATUS_ORDER.indexOf(task.status) + 1) % STATUS_ORDER.length]
     },
 
     deleteTask(state, action: PayloadAction<string>) {
@@ -239,6 +299,13 @@ const workspaceSlice = createSlice({
 
     setAgentRunning(state, action: PayloadAction<{ agentId: string; running: boolean }>) {
       state.agentRunning[action.payload.agentId] = action.payload.running
+      if (!action.payload.running) {
+        delete state.agentAction[action.payload.agentId]
+      }
+    },
+
+    setAgentAction(state, action: PayloadAction<{ agentId: string; action: string }>) {
+      state.agentAction[action.payload.agentId] = action.payload.action
     },
 
     updateMessageContent(state, action: PayloadAction<{ conversationId: string; messageId: string; content: string }>) {
@@ -247,11 +314,6 @@ const workspaceSlice = createSlice({
         const msg = conv.messages.find((m) => m.id === action.payload.messageId)
         if (msg) msg.content = action.payload.content
       }
-    },
-
-    updateAgent(state, action: PayloadAction<{ id: string; updates: Partial<WorkspaceAgent> }>) {
-      const agent = state.agents.find((a) => a.id === action.payload.id)
-      if (agent) Object.assign(agent, action.payload.updates)
     },
 
     setConversationKnowledgeBase(
@@ -279,15 +341,22 @@ export const {
   addMessage,
   addAgent,
   removeAgent,
+  cloneAgent,
+  updateAgent,
+  pauseAgent,
+  resumeAgent,
+  addAgentToConversation,
+  removeAgentFromConversation,
   createTask,
   updateTaskStatus,
+  updateTaskPriority,
   cycleTaskStatus,
   deleteTask,
   setRightPanel,
   toggleLeftPanel,
   setAgentRunning,
+  setAgentAction,
   updateMessageContent,
-  updateAgent,
   setConversationKnowledgeBase,
   clearMessages
 } = workspaceSlice.actions

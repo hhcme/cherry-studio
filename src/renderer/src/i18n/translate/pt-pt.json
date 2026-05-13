@@ -6037,5 +6037,8 @@
     "quit": "Sair",
     "show_window": "Exibir Janela",
     "visualization": "Visualização"
+  },
+  "workspace": {
+    "title": "[to be translated]:Workspace"
   }
 }

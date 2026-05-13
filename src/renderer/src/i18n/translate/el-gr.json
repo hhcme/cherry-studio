@@ -6037,5 +6037,8 @@
     "quit": "Έξοδος",
     "show_window": "Εμφάνιση Παραθύρου",
     "visualization": "προβολή"
+  },
+  "workspace": {
+    "title": "[to be translated]:Workspace"
   }
 }

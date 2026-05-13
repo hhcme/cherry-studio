@@ -6037,5 +6037,8 @@
     "quit": "Thôi",
     "show_window": "Hiển thị Cửa sổ",
     "visualization": "Trực quan hóa"
+  },
+  "workspace": {
+    "title": "[to be translated]:Workspace"
   }
 }

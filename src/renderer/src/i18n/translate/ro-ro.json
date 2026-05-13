@@ -6037,5 +6037,8 @@
     "quit": "Ieșire",
     "show_window": "Afișează fereastra",
     "visualization": "Vizualizare"
+  },
+  "workspace": {
+    "title": "[to be translated]:Workspace"
   }
 }
