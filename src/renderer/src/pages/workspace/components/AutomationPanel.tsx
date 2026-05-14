@@ -1,6 +1,7 @@
 import { DeleteOutlined, PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useAgentClient } from '@renderer/hooks/agents/useAgentClient'
 import { useSettings } from '@renderer/hooks/useSettings'
+import { useAppSelector } from '@renderer/store'
 import type { ScheduledTaskEntity } from '@renderer/types/agent'
 import { Alert, Button, Input, Select, Spin, Tooltip } from 'antd'
 import type { FC } from 'react'
@@ -10,6 +11,8 @@ import { styled } from 'styled-components'
 const AutomationPanel: FC = () => {
   const agentClient = useAgentClient()
   const { apiServer } = useSettings()
+  const { agents } = useAppSelector((s) => s.workspace)
+  const defaultCodeAgentId = agents.find((a) => a.agentType === 'code' && a.mappedAgentId)?.mappedAgentId || ''
 
   const [tasks, setTasks] = useState<ScheduledTaskEntity[]>([])
   const [loading, setLoading] = useState(false)
@@ -97,6 +100,8 @@ const AutomationPanel: FC = () => {
       {showCreate && (
         <CreateTaskForm
           agentClient={agentClient}
+          agents={agents}
+          defaultAgentId={defaultCodeAgentId}
           onCreated={() => {
             setShowCreate(false)
             void loadTasks()
@@ -144,18 +149,22 @@ const AutomationPanel: FC = () => {
 
 const CreateTaskForm: FC<{
   agentClient: any
+  agents: { id: string; name: string; agentType: string; mappedAgentId?: string }[]
+  defaultAgentId: string
   onCreated: () => void
   onCancel: () => void
-}> = ({ agentClient, onCreated, onCancel }) => {
+}> = ({ agentClient, agents, defaultAgentId, onCreated, onCancel }) => {
+  const mappedAgents = agents.filter((a) => a.agentType === 'code' && a.mappedAgentId)
   const [name, setName] = useState('')
   const [prompt, setPrompt] = useState('')
+  const [selectedAgentId, setSelectedAgentId] = useState(defaultAgentId || '')
   const [scheduleType, setScheduleType] = useState<'cron' | 'interval' | 'once'>('interval')
   const [scheduleValue, setScheduleValue] = useState('60')
 
   const handleCreate = async () => {
-    if (!name.trim() || !prompt.trim()) return
+    if (!name.trim() || !prompt.trim() || !selectedAgentId) return
     try {
-      await agentClient.createTask('default-agent', {
+      await agentClient.createTask(selectedAgentId, {
         name: name.trim(),
         prompt: prompt.trim(),
         schedule_type: scheduleType,
@@ -169,6 +178,16 @@ const CreateTaskForm: FC<{
     <FormContainer>
       <FieldLabel>任务名称</FieldLabel>
       <Input size="small" value={name} onChange={(e) => setName(e.target.value)} placeholder="例: 每日代码审查" />
+      <FieldLabel style={{ marginTop: 8 }}>执行 Agent</FieldLabel>
+      <Select
+        style={{ width: '100%' }}
+        size="small"
+        value={selectedAgentId || undefined}
+        onChange={(val) => setSelectedAgentId(val)}
+        placeholder="选择关联的 Code Agent"
+        options={mappedAgents.map((a) => ({ label: a.name, value: a.mappedAgentId }))}
+        notFoundContent="暂无可用的 Code Agent，请先映射"
+      />
       <FieldLabel style={{ marginTop: 8 }}>执行提示词</FieldLabel>
       <Input.TextArea
         rows={2}
@@ -205,7 +224,7 @@ const CreateTaskForm: FC<{
           size="small"
           type="primary"
           onClick={() => void handleCreate()}
-          disabled={!name.trim() || !prompt.trim()}>
+          disabled={!name.trim() || !prompt.trim() || !selectedAgentId}>
           创建
         </Button>
       </FormActions>

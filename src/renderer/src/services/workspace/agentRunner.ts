@@ -1,7 +1,8 @@
 import { fetchChatCompletion, hasApiKey } from '@renderer/services/ApiService'
 import { getDefaultAssistant, getDefaultModel, getProviderByModel } from '@renderer/services/AssistantService'
+import { searchKnowledgeBase } from '@renderer/services/KnowledgeService'
 import { getModelById } from '@renderer/services/ModelService'
-import type { WorkspaceAgent, WorkspaceMessage } from '@renderer/store/workspace'
+import type { ToolCallData, WorkspaceAgent, WorkspaceMessage } from '@renderer/store/workspace'
 import type { ApiServerConfig } from '@renderer/types/apiServer'
 import type { Chunk } from '@renderer/types/chunk'
 import { ChunkType } from '@renderer/types/chunk'
@@ -12,8 +13,10 @@ export interface AgentRunOptions {
   conversationHistory: WorkspaceMessage[]
   agents: WorkspaceAgent[]
   onChunk?: (text: string) => void
+  onToolCall?: (toolData: ToolCallData) => void
   apiServer?: ApiServerConfig
   agentMapping?: Record<string, { agentId: string; sessionId: string }>
+  knowledgeBaseId?: string
 }
 
 export interface AgentRunResult {
@@ -42,7 +45,12 @@ async function runChatAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   assistant.model = model
   assistant.prompt = opts.agent.systemPrompt || buildDefaultPrompt(opts.agent, opts.agents)
 
-  const sdkMessages = buildMessages(opts)
+  let userMessage = opts.userMessage
+  if (opts.knowledgeBaseId) {
+    userMessage = await injectKnowledgeContext(opts.knowledgeBaseId, opts.userMessage)
+  }
+
+  const sdkMessages = buildMessages({ ...opts, userMessage })
 
   let fullText = ''
   await fetchChatCompletion({
@@ -59,6 +67,28 @@ async function runChatAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   const tasks = extractTasks(fullText, opts.agents)
 
   return { content: fullText, tasks }
+}
+
+async function injectKnowledgeContext(knowledgeBaseId: string, userMessage: string): Promise<string> {
+  try {
+    const { default: store } = await import('@renderer/store')
+    const state = store.getState()
+    const bases = state.knowledge?.bases || []
+    const base = bases.find((b: any) => b.id === knowledgeBaseId)
+    if (!base) return userMessage
+
+    const results = await searchKnowledgeBase(userMessage, base)
+    if (!results || results.length === 0) return userMessage
+
+    const references = results
+      .slice(0, 5)
+      .map((r, i) => `[${i + 1}] ${r.pageContent}`)
+      .join('\n\n')
+
+    return `${userMessage}\n\n## 参考资料:\n${references}\n\n请基于以上参考资料回答问题，并在适当位置引用来源 [编号]。`
+  } catch {
+    return userMessage
+  }
 }
 
 async function runCodeAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
@@ -119,12 +149,45 @@ async function runCodeAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
 
           try {
             const parsed = JSON.parse(data)
-            if (parsed.type === 'text-delta' && parsed.text) {
-              fullText += parsed.text
-              opts.onChunk?.(fullText)
-            } else if (parsed.type === 'text' && parsed.text) {
-              fullText = parsed.text
-              opts.onChunk?.(fullText)
+            switch (parsed.type) {
+              case 'text-delta':
+                if (parsed.text) {
+                  fullText += parsed.text
+                  opts.onChunk?.(fullText)
+                }
+                break
+              case 'text':
+                if (parsed.text) {
+                  fullText = parsed.text
+                  opts.onChunk?.(fullText)
+                }
+                break
+              case 'tool-call':
+                opts.onToolCall?.({
+                  toolName: parsed.toolName || 'unknown',
+                  input: typeof parsed.input === 'object' && parsed.input !== null ? parsed.input : {},
+                  status: 'running',
+                  filePath: parsed.input?.file_path || parsed.input?.command ? undefined : undefined
+                })
+                break
+              case 'tool-result':
+                opts.onToolCall?.({
+                  toolName: parsed.toolName || 'unknown',
+                  input: typeof parsed.input === 'object' && parsed.input !== null ? parsed.input : {},
+                  output: typeof parsed.output === 'string' ? parsed.output : JSON.stringify(parsed.output),
+                  status: 'completed',
+                  filePath: parsed.input?.file_path
+                })
+                break
+              case 'tool-error':
+                opts.onToolCall?.({
+                  toolName: parsed.toolName || 'unknown',
+                  input: typeof parsed.input === 'object' && parsed.input !== null ? parsed.input : {},
+                  output: typeof parsed.error === 'string' ? parsed.error : parsed.error?.message || '工具调用出错',
+                  status: 'error',
+                  filePath: parsed.input?.file_path
+                })
+                break
             }
           } catch {
             // skip malformed SSE lines
@@ -151,8 +214,10 @@ function buildBaseURL(apiServer: ApiServerConfig): string {
 function buildDefaultPrompt(agent: WorkspaceAgent, allAgents: WorkspaceAgent[]): string {
   const teamDesc = allAgents
     .filter((a) => a.id !== agent.id)
-    .map((a) => `- ${a.name}（${a.role}）`)
+    .map((a) => `- ${a.name}（${a.role}）[${a.agentType === 'code' ? '编程' : '对话'}]`)
     .join('\n')
+
+  const teamNames = allAgents.filter((a) => a.id !== agent.id).map((a) => a.name)
 
   if (agent.isMain) {
     return `你是 PM Agent（产品经理），负责协调项目中的 Agent 团队完成用户需求。
@@ -165,12 +230,34 @@ function buildDefaultPrompt(agent: WorkspaceAgent, allAgents: WorkspaceAgent[]):
 团队成员：
 ${teamDesc || '（暂无其他 Agent）'}
 
-回复格式：使用 Markdown。如果需要创建任务，请在回复末尾用以下 JSON 格式（用三个反引号+json 代码块包裹）：
-{"tasks": [{"title": "任务标题", "description": "任务描述", "assignTo": "Agent名称"}]}`
+## 输出规则
+
+先用 Markdown 写分析和计划，然后在回复的**最后**用以下格式输出任务列表（用三个反引号+json 包裹）：
+
+\`\`\`json
+{
+  "tasks": [
+    {
+      "title": "任务标题（简洁）",
+      "description": "任务详细描述，包含验收标准",
+      "assignTo": "${teamNames[0] || 'Agent名称'}"
+    }
+  ]
+}
+\`\`\`
+
+assignTo 必须是以下之一：${teamNames.join('、') || '（暂无）'}
+description 应包含具体的执行步骤和验收条件。
+优先级高的任务排在前面。
+不要在 JSON 外面重复任务信息。`
   }
 
   return `你是 ${agent.name}（${agent.role}），负责根据 PM 分配的任务完成工作。
-回复使用 Markdown 格式，代码使用语言标记的代码块。`
+
+## 输出规则
+- 回复使用 Markdown 格式
+- 代码使用对应语言的代码块标记
+- 完成任务后简要总结成果`
 }
 
 function buildMessages(opts: AgentRunOptions) {
@@ -194,22 +281,38 @@ function extractTasks(
   text: string,
   agents: WorkspaceAgent[]
 ): Array<{ title: string; description: string; assignedTo: string }> | undefined {
-  const jsonBlockMatch = text.match(/```json\s*\n?([\s\S]*?)\n?```/)
-  if (!jsonBlockMatch) return undefined
+  const extracted = tryExtractTaskJSON(text)
+  if (!extracted) return undefined
 
   try {
-    const parsed = JSON.parse(jsonBlockMatch[1])
+    const parsed = JSON.parse(extracted)
     if (parsed.tasks && Array.isArray(parsed.tasks)) {
       return parsed.tasks.map((t: any) => ({
         title: String(t.title || '未命名任务'),
         description: String(t.description || ''),
-        assignedTo: resolveAgentId(String(t.assignTo || ''), agents)
+        assignedTo: resolveAgentId(String(t.assignTo || t.assign_to || t.assignee || ''), agents)
       }))
     }
   } catch {
     return undefined
   }
   return undefined
+}
+
+function tryExtractTaskJSON(text: string): string | null {
+  // 1. 标准 ```json 代码块
+  const jsonBlock = text.match(/```json\s*\n?([\s\S]*?)\n?```/)
+  if (jsonBlock) return jsonBlock[1].trim()
+
+  // 2. 任意 ``` 代码块（可能没有 json 标记）
+  const anyBlock = text.match(/```\s*\n?([\s\S]*?)\n?```/)
+  if (anyBlock && anyBlock[1].trim().startsWith('{')) return anyBlock[1].trim()
+
+  // 3. 行内 JSON（{...tasks...}）
+  const inlineMatch = text.match(/\{[\s\S]*?"tasks"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/)
+  if (inlineMatch) return inlineMatch[0]
+
+  return null
 }
 
 function resolveAgentId(nameOrId: string, agents: WorkspaceAgent[]): string {

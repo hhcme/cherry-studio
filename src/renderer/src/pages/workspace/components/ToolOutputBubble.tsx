@@ -1,7 +1,21 @@
+import { parseDiffFromFile } from '@pierre/diffs'
+import { FileDiff } from '@pierre/diffs/react'
 import CodeViewer from '@renderer/components/CodeViewer'
+import { useCodeStyle } from '@renderer/context/CodeStyleProvider'
 import { getLanguageByFilePath } from '@renderer/utils/code-language'
-import { AlertTriangle, CheckCircle, Code, FileEdit, FileSearch, Loader2, Terminal, Wrench } from 'lucide-react'
-import { type FC, useState } from 'react'
+import {
+  AlertTriangle,
+  CheckCircle,
+  Code,
+  Columns2,
+  FileEdit,
+  FileSearch,
+  Loader2,
+  Rows2,
+  Terminal,
+  Wrench
+} from 'lucide-react'
+import { type FC, useMemo, useState } from 'react'
 import { styled } from 'styled-components'
 
 import type { WorkspaceMessage } from '../../../store/workspace'
@@ -102,25 +116,41 @@ function BashContent({ command, description, output }: { command?: string; descr
 }
 
 function EditContent({ input, output }: { input: Record<string, any>; output?: string }) {
-  const filePath = input.file_path
+  const { activeShikiTheme, isShikiThemeDark } = useCodeStyle()
+  const [diffStyle, setDiffStyle] = useState<'unified' | 'split'>('unified')
+  const filePath = input.file_path || ''
   const oldStr = input.old_string || ''
   const newStr = input.new_string || ''
 
+  const fileDiff = useMemo(
+    () => parseDiffFromFile({ name: filePath, contents: oldStr }, { name: filePath, contents: newStr }),
+    [filePath, oldStr, newStr]
+  )
+
+  const diffOptions = useMemo(
+    () => ({
+      disableFileHeader: true,
+      diffStyle,
+      overflow: 'wrap' as const,
+      theme: activeShikiTheme,
+      themeType: (isShikiThemeDark ? 'dark' : 'light') as 'dark' | 'light'
+    }),
+    [activeShikiTheme, isShikiThemeDark, diffStyle]
+  )
+
+  const ToggleIcon = diffStyle === 'unified' ? Columns2 : Rows2
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {filePath && <FilePathRow>{filePath}</FilePathRow>}
-      {oldStr && (
-        <Section>
-          <SectionLabel>替换前</SectionLabel>
-          <RemovedBlock>{truncateStr(oldStr, 1000)}</RemovedBlock>
-        </Section>
-      )}
-      {newStr && (
-        <Section>
-          <SectionLabel>替换后</SectionLabel>
-          <AddedBlock>{truncateStr(newStr, 1000)}</AddedBlock>
-        </Section>
-      )}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, position: 'relative' }}>
+      <DiffToolbar>
+        {filePath && <FilePathRow>{filePath}</FilePathRow>}
+        <DiffToggleBtn
+          onClick={() => setDiffStyle((s) => (s === 'unified' ? 'split' : 'unified'))}
+          title="切换 diff 样式">
+          <ToggleIcon size={14} />
+        </DiffToggleBtn>
+      </DiffToolbar>
+      {(oldStr || newStr) && <FileDiff fileDiff={fileDiff} options={diffOptions} />}
       {output && (
         <Section>
           <SectionLabel>结果</SectionLabel>
@@ -387,44 +417,36 @@ const OutputText = styled.div`
   padding: 4px 0;
 `
 
-const RemovedBlock = styled.pre`
-  font-family: 'SF Mono', 'Menlo', monospace;
-  font-size: 11px;
-  line-height: 1.4;
-  padding: 8px;
-  background: color-mix(in srgb, #ff4d4f 8%, var(--color-background));
-  border-left: 3px solid #ff4d4f;
-  border-radius: 6px;
-  overflow-x: auto;
-  color: var(--color-text);
-  margin: 0;
-  max-height: 200px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-`
-
-const AddedBlock = styled.pre`
-  font-family: 'SF Mono', 'Menlo', monospace;
-  font-size: 11px;
-  line-height: 1.4;
-  padding: 8px;
-  background: color-mix(in srgb, #52c41a 8%, var(--color-background));
-  border-left: 3px solid #52c41a;
-  border-radius: 6px;
-  overflow-x: auto;
-  color: var(--color-text);
-  margin: 0;
-  max-height: 200px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-`
-
 const FilePathRow = styled.div`
   font-family: 'SF Mono', 'Menlo', monospace;
   font-size: 11px;
   color: var(--color-primary);
   padding: 2px 0;
   word-break: break-all;
+`
+
+const DiffToolbar = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+`
+
+const DiffToggleBtn = styled.button`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  background-color: var(--color-background-soft);
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+  &:hover {
+    color: var(--color-text);
+  }
 `
 
 const CodeInline = styled.code`
