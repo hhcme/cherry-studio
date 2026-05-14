@@ -133,7 +133,7 @@ function EditContent({ input, output }: { input: Record<string, any>; output?: s
       diffStyle,
       overflow: 'wrap' as const,
       theme: activeShikiTheme,
-      themeType: (isShikiThemeDark ? 'dark' : 'light') as 'dark' | 'light'
+      themeType: isShikiThemeDark ? ('dark' as const) : ('light' as const)
     }),
     [activeShikiTheme, isShikiThemeDark, diffStyle]
   )

@@ -139,7 +139,7 @@ const TaskBoard: FC = () => {
             </ColumnLabel>
             {colTasks.map((task) => {
               const agent = agents.find((a) => a.id === task.assignedTo)
-              const pri = PRIORITY_CONFIG[task.priority]
+              const pri = PRIORITY_CONFIG[task.priority] || { label: '普通', color: 'var(--color-text-secondary)' }
               return (
                 <TaskCard key={task.id}>
                   <TaskHeader>

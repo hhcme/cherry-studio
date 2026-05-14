@@ -195,6 +195,7 @@ export class WindowService {
         //[mac]hacky-fix: miniWindow set visibleOnFullScreen:true will cause dock icon disappeared
         void app.dock?.show()
         mainWindow.show()
+        mainWindow.focus()
       }
     })
 
