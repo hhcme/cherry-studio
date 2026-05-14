@@ -11,6 +11,7 @@ import type { FC } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { styled } from 'styled-components'
 
+import ToolOutputBubble from './ToolOutputBubble'
 import WorkspaceMarkdown from './WorkspaceMarkdown'
 
 const AGENT_COLOR_MAP: Record<string, string> = {
@@ -418,6 +419,26 @@ const MessageBubble: FC<{
     )
   }
 
+  if (msg.messageType === 'tool_call' || msg.messageType === 'tool_result') {
+    return (
+      <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.2 }}>
+        <AgentBubble>
+          <AgentAvatarMedium color={AGENT_COLOR_MAP[agent?.color || 'blue'] || '#1677ff'}>
+            {agent?.avatar || '?'}
+          </AgentAvatarMedium>
+          <BubbleBody>
+            <AgentNameRow>
+              <AgentName>{agent?.name || 'Unknown'}</AgentName>
+              {agent?.agentType === 'code' && <CodeTag>Code</CodeTag>}
+              <ToolLabel>{msg.messageType === 'tool_call' ? '工具调用' : '工具结果'}</ToolLabel>
+            </AgentNameRow>
+            <ToolOutputBubble msg={msg} />
+          </BubbleBody>
+        </AgentBubble>
+      </motion.div>
+    )
+  }
+
   return (
     <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.2 }}>
       <AgentBubble>
@@ -668,6 +689,15 @@ const CodeTag = styled.span`
   border-radius: 4px;
   background: color-mix(in srgb, var(--color-primary) 12%, transparent);
   color: var(--color-primary);
+  font-weight: 500;
+`
+
+const ToolLabel = styled.span`
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, #faad14 12%, transparent);
+  color: #faad14;
   font-weight: 500;
 `
 

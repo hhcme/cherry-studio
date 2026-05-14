@@ -11,9 +11,12 @@ import {
 } from '@renderer/store/workspace'
 import { Select, Tooltip } from 'antd'
 import { AnimatePresence, motion } from 'framer-motion'
-import { CheckCircle, Circle, Clock, FileText, Globe, ListChecks, Pause, Users, X } from 'lucide-react'
+import { CheckCircle, Circle, Clock, FileText, FolderTree, Globe, ListChecks, Pause, Users, X } from 'lucide-react'
 import type { FC } from 'react'
 import { styled } from 'styled-components'
+
+import DocumentEditorPanel from './DocumentEditorPanel'
+import FileBrowserPanel from './FileBrowserPanel'
 
 const AGENT_COLOR_MAP: Record<string, string> = {
   blue: '#1677ff',
@@ -35,9 +38,10 @@ const PRIORITY_CONFIG: Record<TaskPriority, { label: string; color: string }> = 
 const panels = [
   { id: 'tasks', icon: ListChecks, label: '任务' },
   { id: 'agents', icon: Users, label: 'Agent' },
+  { id: 'files', icon: FolderTree, label: '文件' },
+  { id: 'editor', icon: FileText, label: '文档' },
   { id: 'knowledge', icon: DatabaseOutlined, label: '知识库' },
   { id: 'browser', icon: Globe, label: '浏览器' },
-  { id: 'editor', icon: FileText, label: '文档' },
   { id: 'automation', icon: Clock, label: '自动化' }
 ]
 
@@ -76,8 +80,10 @@ const ToolPanel: FC = () => {
                 <PanelBody>
                   {rightPanel === 'tasks' && <TaskBoard />}
                   {rightPanel === 'agents' && <AgentTeamPanel />}
+                  {rightPanel === 'files' && <FileBrowserPanel />}
+                  {rightPanel === 'editor' && <DocumentEditorPanel />}
                   {rightPanel === 'knowledge' && <KnowledgePanel />}
-                  {!['tasks', 'agents', 'knowledge'].includes(rightPanel) && (
+                  {!['tasks', 'agents', 'files', 'editor', 'knowledge'].includes(rightPanel) && (
                     <Placeholder>
                       <p>{panels.find((p) => p.id === rightPanel)?.label}</p>
                       <span>（待实现）</span>

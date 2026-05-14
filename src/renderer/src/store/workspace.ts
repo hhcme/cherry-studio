@@ -27,6 +27,15 @@ export interface WorkspaceConversation {
   messages: WorkspaceMessage[]
   createdAt: string
   knowledgeBaseId?: string
+  workDir?: string
+}
+
+export interface ToolCallData {
+  toolName: string
+  input: Record<string, any>
+  output?: string
+  status: 'running' | 'completed' | 'error'
+  filePath?: string
 }
 
 export interface WorkspaceMessage {
@@ -37,6 +46,7 @@ export interface WorkspaceMessage {
   messageType: 'text' | 'task_create' | 'task_update' | 'tool_call' | 'tool_result'
   createdAt: string
   replyTo?: string
+  toolData?: ToolCallData
 }
 
 export type TaskStatus = 'queued' | 'in_progress' | 'blocked' | 'paused' | 'pending_review' | 'completed'
@@ -62,6 +72,7 @@ export interface WorkspaceState {
   leftPanelCollapsed: boolean
   agentRunning: Record<string, boolean>
   agentAction: Record<string, string>
+  activeFile: string | null
 }
 
 const AGENT_COLORS = ['blue', 'purple', 'emerald', 'orange', 'pink', 'cyan', 'amber', 'rose']
@@ -127,7 +138,8 @@ const initialState: WorkspaceState = {
   rightPanel: null,
   leftPanelCollapsed: false,
   agentRunning: {},
-  agentAction: {}
+  agentAction: {},
+  activeFile: null
 }
 
 const STATUS_ORDER: TaskStatus[] = ['queued', 'in_progress', 'blocked', 'paused', 'pending_review', 'completed']
@@ -329,6 +341,15 @@ const workspaceSlice = createSlice({
     clearMessages(state, action: PayloadAction<string>) {
       const conv = state.conversations.find((c) => c.id === action.payload)
       if (conv) conv.messages = []
+    },
+
+    setConversationWorkDir(state, action: PayloadAction<{ conversationId: string; workDir: string }>) {
+      const conv = state.conversations.find((c) => c.id === action.payload.conversationId)
+      if (conv) conv.workDir = action.payload.workDir
+    },
+
+    setActiveFile(state, action: PayloadAction<string | null>) {
+      state.activeFile = action.payload
     }
   }
 })
@@ -358,7 +379,9 @@ export const {
   setAgentAction,
   updateMessageContent,
   setConversationKnowledgeBase,
-  clearMessages
+  clearMessages,
+  setConversationWorkDir,
+  setActiveFile
 } = workspaceSlice.actions
 
 export default workspaceSlice.reducer
