@@ -1,3 +1,5 @@
+import RichEditor from '@renderer/components/RichEditor'
+import type { RichEditorRef } from '@renderer/components/RichEditor/types'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { setActiveFile } from '@renderer/store/workspace'
 import { Alert, Spin, Tooltip } from 'antd'
@@ -5,6 +7,13 @@ import { Save, X } from 'lucide-react'
 import type { FC } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { styled } from 'styled-components'
+
+const MARKDOWN_EXTS = new Set(['md', 'markdown', 'mdx', 'txt', 'text'])
+
+function isMarkdownFile(filePath: string): boolean {
+  const ext = filePath.split('.').pop()?.toLowerCase() || ''
+  return MARKDOWN_EXTS.has(ext)
+}
 
 const DocumentEditorPanel: FC = () => {
   const dispatch = useAppDispatch()
@@ -15,7 +24,8 @@ const DocumentEditorPanel: FC = () => {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const richEditorRef = useRef<RichEditorRef>(null)
+  const isRich = activeFile ? isMarkdownFile(activeFile) : false
 
   const loadFile = useCallback(async () => {
     if (!activeFile) {
@@ -48,7 +58,8 @@ const DocumentEditorPanel: FC = () => {
     if (!activeFile || !dirty) return
     setSaving(true)
     try {
-      await window.api.file.write(activeFile, content)
+      const saveContent = isRich ? (richEditorRef.current?.getMarkdown() ?? content) : content
+      await window.api.file.write(activeFile, saveContent)
       setDirty(false)
     } catch (err: any) {
       setError(err.message || '保存失败')
@@ -76,15 +87,15 @@ const DocumentEditorPanel: FC = () => {
   const fileName = activeFile.split('/').pop() || activeFile
 
   return (
-    <div>
-      <EditorHeader>
+    <EditorContainer>
+      <EditorHeader onKeyDown={handleKeyDown}>
         <FileInfo>
           <FileName>{fileName}</FileName>
           {dirty && <DirtyMark>未保存</DirtyMark>}
         </FileInfo>
         <HeaderActions>
           <Tooltip title="保存 (Cmd+S)">
-            <ActionBtn onClick={handleSave} disabled={!dirty || saving}>
+            <ActionBtn onClick={() => void handleSave()} disabled={!dirty || saving}>
               <Save size={14} />
             </ActionBtn>
           </Tooltip>
@@ -112,27 +123,45 @@ const DocumentEditorPanel: FC = () => {
         <SpinContainer>
           <Spin size="small" />
         </SpinContainer>
+      ) : isRich ? (
+        <RichEditorWrapper>
+          <RichEditor
+            key={activeFile}
+            ref={richEditorRef}
+            initialContent={content}
+            placeholder="开始编辑..."
+            editable
+            showToolbar
+            onMarkdownChange={() => setDirty(true)}
+            className="workspace-rich-editor"
+          />
+        </RichEditorWrapper>
       ) : (
         <CodeArea
-          ref={textareaRef}
           value={content}
           onChange={(e) => {
             setContent(e.target.value)
             setDirty(true)
           }}
-          onKeyDown={handleKeyDown}
           spellCheck={false}
         />
       )}
-    </div>
+    </EditorContainer>
   )
 }
+
+const EditorContainer = styled.div`
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+`
 
 const EditorHeader = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 8px 4px;
+  flex-shrink: 0;
 `
 
 const FileInfo = styled.div`
@@ -169,6 +198,7 @@ const FilePath = styled.div`
   text-overflow: ellipsis;
   white-space: nowrap;
   opacity: 0.7;
+  flex-shrink: 0;
 `
 
 const HeaderActions = styled.div`
@@ -185,7 +215,7 @@ const ActionBtn = styled.button<{ disabled?: boolean }>`
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: ${({ disabled }) => (disabled ? 'var(--color-text-secondary)' : 'var(--color-text-secondary)')};
+  color: var(--color-text-secondary);
   cursor: ${({ disabled }) => (disabled ? 'not-allowed' : 'pointer')};
   opacity: ${({ disabled }) => (disabled ? 0.4 : 1)};
   &:hover:not(:disabled) {
@@ -200,9 +230,20 @@ const SpinContainer = styled.div`
   padding: 20px;
 `
 
+const RichEditorWrapper = styled.div`
+  flex: 1;
+  overflow: auto;
+  border: 0.5px solid var(--color-border);
+  border-radius: 8px;
+
+  .workspace-rich-editor {
+    height: 100%;
+  }
+`
+
 const CodeArea = styled.textarea`
+  flex: 1;
   width: 100%;
-  height: calc(100% - 80px);
   min-height: 200px;
   padding: 8px;
   border: 0.5px solid var(--color-border);

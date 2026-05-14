@@ -10,11 +10,12 @@ import {
   TeamOutlined,
   UserAddOutlined
 } from '@ant-design/icons'
+import { useAgentClient } from '@renderer/hooks/agents/useAgentClient'
+import { useProviders } from '@renderer/hooks/useProvider'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import { Button, Dropdown, Input, Select, Tooltip } from 'antd'
 import type { FC } from 'react'
 const { TextArea } = Input
-import { useProviders } from '@renderer/hooks/useProvider'
 import type { AgentType } from '@renderer/store/workspace'
 import {
   addAgent,
@@ -448,9 +449,31 @@ const AgentEditModal: FC<{ agentId: string; onClose: () => void }> = ({ agentId,
   const dispatch = useAppDispatch()
   const agent = useAppSelector((s) => s.workspace.agents.find((a) => a.id === agentId))
   const { providers } = useProviders()
+  const { apiServer } = useAppSelector((s) => s.settings)
+  const agentClient = useAgentClient()
   const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt || '')
   const [modelId, setModelId] = useState(agent?.modelId || '')
   const [permissionMode, setPermissionMode] = useState(agent?.permissionMode || 'default')
+  const [mappedAgentId, setMappedAgentId] = useState(agent?.mappedAgentId || '')
+  const [mappedSessionId, setMappedSessionId] = useState(agent?.mappedSessionId || '')
+  const [cherryAgents, setCherryAgents] = useState<Array<{ id: string; name: string }>>([])
+  const [cherrySessions, setCherrySessions] = useState<Array<{ id: string; name: string }>>([])
+
+  useEffect(() => {
+    if (agent?.agentType !== 'code' || !apiServer?.enabled) return
+    agentClient
+      .listAgents()
+      .then((res: any) => setCherryAgents(res.data || []))
+      .catch(() => {})
+  }, [agent?.agentType, apiServer?.enabled, agentClient])
+
+  useEffect(() => {
+    if (!mappedAgentId || !apiServer?.enabled) return
+    agentClient
+      .listSessions(mappedAgentId)
+      .then((res: any) => setCherrySessions(res.data || []))
+      .catch(() => {})
+  }, [mappedAgentId, apiServer?.enabled, agentClient])
 
   if (!agent) return null
 
@@ -462,10 +485,28 @@ const AgentEditModal: FC<{ agentId: string; onClose: () => void }> = ({ agentId,
     dispatch(
       updateAgent({
         id: agentId,
-        updates: { systemPrompt, modelId: modelId || undefined, permissionMode }
+        updates: {
+          systemPrompt,
+          modelId: modelId || undefined,
+          permissionMode,
+          mappedAgentId: mappedAgentId || undefined,
+          mappedSessionId: mappedSessionId || undefined
+        }
       })
     )
     onClose()
+  }
+
+  const handleCreateSession = async () => {
+    if (!mappedAgentId) return
+    try {
+      const session = await agentClient.createSession(mappedAgentId, {
+        name: `workspace-${agent.name}`,
+        accessible_paths: [],
+        model: 'default'
+      })
+      setMappedSessionId(session.id)
+    } catch {}
   }
 
   return (
@@ -495,6 +536,53 @@ const AgentEditModal: FC<{ agentId: string; onClose: () => void }> = ({ agentId,
             { label: '全自动（无限制）', value: 'bypassPermissions' }
           ]}
         />
+        {agent.agentType === 'code' && (
+          <>
+            <FieldLabel style={{ marginTop: 12 }}>关联 Cherry Studio Agent</FieldLabel>
+            {!apiServer?.enabled ? (
+              <DisabledHint>需要启用 API Server 才能关联 Agent</DisabledHint>
+            ) : (
+              <>
+                <Select
+                  style={{ width: '100%' }}
+                  placeholder="选择 Cherry Studio Agent"
+                  allowClear
+                  value={mappedAgentId || undefined}
+                  onChange={(val) => {
+                    setMappedAgentId(val || '')
+                    setMappedSessionId('')
+                    setCherrySessions([])
+                  }}
+                  options={cherryAgents.map((a) => ({ label: a.name, value: a.id }))}
+                  showSearch
+                  filterOption={(input, option) =>
+                    (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                  }
+                />
+                {mappedAgentId && (
+                  <>
+                    <FieldLabel style={{ marginTop: 8 }}>关联 Session</FieldLabel>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <Select
+                        style={{ flex: 1 }}
+                        placeholder="选择 Session"
+                        allowClear
+                        value={mappedSessionId || undefined}
+                        onChange={(val) => setMappedSessionId(val || '')}
+                        options={cherrySessions.map((s) => ({ label: s.name || s.id, value: s.id }))}
+                      />
+                      <Tooltip title="新建 Session">
+                        <Button size="small" onClick={() => void handleCreateSession()}>
+                          <PlusOutlined />
+                        </Button>
+                      </Tooltip>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+          </>
+        )}
         <FieldLabel style={{ marginTop: 12 }}>系统提示词</FieldLabel>
         <TextArea
           rows={4}
@@ -763,6 +851,13 @@ const EmptyText = styled.div`
   color: var(--color-text-secondary);
   text-align: center;
   padding: 12px 0;
+`
+
+const DisabledHint = styled.div`
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  padding: 6px 0;
+  opacity: 0.7;
 `
 
 const ModalOverlay = styled.div`

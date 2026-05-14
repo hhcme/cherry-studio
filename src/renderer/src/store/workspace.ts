@@ -18,6 +18,8 @@ export interface WorkspaceAgent {
   status: AgentStatus
   permissionMode: PermissionMode
   workDir?: string
+  mappedAgentId?: string
+  mappedSessionId?: string
 }
 
 export interface WorkspaceConversation {

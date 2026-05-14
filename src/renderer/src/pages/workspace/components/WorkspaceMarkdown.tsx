@@ -1,16 +1,85 @@
-import { type FC, memo } from 'react'
-import ReactMarkdown from 'react-markdown'
+import 'katex/dist/katex.min.css'
+
+import { CodeBlockView } from '@renderer/components/CodeBlockView'
+import ImageViewer from '@renderer/components/ImageViewer'
+import { useSettings } from '@renderer/hooks/useSettings'
+import { removeSvgEmptyLines } from '@renderer/utils/formats'
+import { processLatexBrackets } from '@renderer/utils/markdown'
+import { type FC, memo, useMemo } from 'react'
+import ReactMarkdown, { type Components, defaultUrlTransform } from 'react-markdown'
+import rehypeKatex from 'rehype-katex'
+import rehypeRaw from 'rehype-raw'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
 import { styled } from 'styled-components'
 
 interface Props {
   content: string
 }
 
+const ALLOWED_ELEMENTS =
+  /<(style|p|div|span|b|i|strong|em|ul|ol|li|table|tr|td|th|thead|tbody|h[1-6]|blockquote|pre|code|br|hr|svg|path|circle|rect|line|polyline|polygon|text|g|defs|title|desc|tspan|sub|sup|details|summary)/i
+
+const WorkspaceCodeBlock: FC<{ children: string; className?: string }> = ({ children, className }) => {
+  const languageMatch = /language-([\w-+]+)/.exec(className || '')
+  const language = languageMatch?.[1] ?? (children?.includes('\n') ? 'text' : null)
+
+  if (language !== null) {
+    return <CodeBlockView language={language}>{children}</CodeBlockView>
+  }
+
+  return (
+    <code className={className} style={{ textWrap: 'wrap', fontSize: '95%', padding: '2px 4px' }}>
+      {children}
+    </code>
+  )
+}
+
 const WorkspaceMarkdown: FC<Props> = ({ content }) => {
+  const { mathEngine, mathEnableSingleDollar } = useSettings()
+
+  const processedContent = useMemo(() => {
+    return removeSvgEmptyLines(processLatexBrackets(content))
+  }, [content])
+
+  const remarkPlugins = useMemo(() => {
+    const plugins: any[] = [[remarkGfm, { singleTilde: false }]]
+    if (mathEngine === 'KaTeX') {
+      plugins.push([remarkMath, { singleDollarTextMath: mathEnableSingleDollar }])
+    }
+    return plugins
+  }, [mathEngine, mathEnableSingleDollar])
+
+  const rehypePlugins = useMemo(() => {
+    const plugins: any[] = []
+    if (ALLOWED_ELEMENTS.test(processedContent)) {
+      plugins.push(rehypeRaw)
+    }
+    if (mathEngine === 'KaTeX') {
+      plugins.push(rehypeKatex)
+    }
+    return plugins
+  }, [mathEngine, processedContent])
+
+  const components = useMemo(
+    () =>
+      ({
+        code: (props: any) => <WorkspaceCodeBlock {...props} />,
+        img: (props: any) => <ImageViewer style={{ maxWidth: 500, maxHeight: 500 }} {...props} />,
+        pre: (props: any) => <pre style={{ overflow: 'visible' }} {...props} />
+      }) as Partial<Components>,
+    []
+  )
+
   return (
     <Wrapper className="markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
+        components={components}
+        urlTransform={defaultUrlTransform}>
+        {processedContent}
+      </ReactMarkdown>
     </Wrapper>
   )
 }
@@ -61,11 +130,6 @@ const Wrapper = styled.div`
 
   pre {
     margin: 8px 0;
-    padding: 12px;
-    background: var(--color-background-soft);
-    border: 0.5px solid var(--color-border);
-    border-radius: 8px;
-    overflow-x: auto;
 
     code {
       background: none;

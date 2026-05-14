@@ -1,8 +1,16 @@
 import { useSettings } from '@renderer/hooks/useSettings'
 import { runAgent } from '@renderer/services/workspace/agentRunner'
+import { TaskScheduler } from '@renderer/services/workspace/taskScheduler'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import type { WorkspaceMessage } from '@renderer/store/workspace'
-import { addMessage, clearMessages, createTask, setAgentAction, setAgentRunning } from '@renderer/store/workspace'
+import {
+  addMessage,
+  clearMessages,
+  createTask,
+  setAgentAction,
+  setAgentRunning,
+  updateTaskStatus
+} from '@renderer/store/workspace'
 import type { MenuProps } from 'antd'
 import { Dropdown } from 'antd'
 import { motion } from 'framer-motion'
@@ -37,6 +45,7 @@ const MultiAgentChat: FC = () => {
   const [replyTo, setReplyTo] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef(false)
+  const schedulerRef = useRef<TaskScheduler | null>(null)
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
   const messages = activeConversation?.messages || []
@@ -77,6 +86,12 @@ const MultiAgentChat: FC = () => {
       if (!pmAgent) return
 
       const subAgents = convAgents.filter((a) => a.id !== pmAgent.id)
+      const agentMapping: Record<string, { agentId: string; sessionId: string }> = {}
+      for (const a of convAgents) {
+        if (a.mappedAgentId && a.mappedSessionId) {
+          agentMapping[a.id] = { agentId: a.mappedAgentId, sessionId: a.mappedSessionId }
+        }
+      }
 
       try {
         dispatch(setAgentRunning({ agentId: pmAgent.id, running: true }))
@@ -105,6 +120,7 @@ const MultiAgentChat: FC = () => {
           conversationHistory: activeConversation?.messages || [],
           agents: convAgents,
           apiServer,
+          agentMapping,
           onChunk: (text) => {
             if (abortRef.current) return
             dispatch({
@@ -125,68 +141,40 @@ const MultiAgentChat: FC = () => {
 
         if (subAgents.length === 0) return
 
-        addEventMessage(`${subAgents.map((a) => a.name).join('、')} 开始并行工作`)
+        addEventMessage(`开始执行任务（按依赖顺序，每 Agent 串行）`)
 
-        const pmContext: WorkspaceMessage = {
-          id: 'ctx-pm',
-          agentId: pmAgent.id,
-          role: 'agent',
-          content: pmResult.content,
-          messageType: 'text',
-          createdAt: new Date().toISOString()
-        }
+        const scheduler = new TaskScheduler({
+          onTaskStatusChange: (taskId, status) => {
+            dispatch(updateTaskStatus({ taskId, status }))
+          },
+          onAgentRunning: (agentId, running) => {
+            dispatch(setAgentRunning({ agentId, running }))
+          },
+          onAgentAction: (agentId, action) => {
+            dispatch(setAgentAction({ agentId, action }))
+          },
+          onAddMessage: (convId, message) => {
+            dispatch(addMessage({ conversationId: convId, message }))
+          },
+          onUpdateMessageContent: (convId, messageId, content) => {
+            dispatch({
+              type: 'workspace/updateMessageContent',
+              payload: { conversationId: convId, messageId, content }
+            })
+          },
+          onAddEventMessage: (text) => addEventMessage(text)
+        })
+        schedulerRef.current = scheduler
 
-        const results = await Promise.allSettled(
-          subAgents.map(async (subAgent) => {
-            dispatch(setAgentRunning({ agentId: subAgent.id, running: true }))
-            dispatch(setAgentAction({ agentId: subAgent.id, action: '正在执行任务...' }))
+        const convTasks = tasks.filter((t) => t.conversationId === activeConversationId)
+        await scheduler.executeTasks(convTasks, convAgents, activeConversationId, activeConversation?.messages || [], {
+          agents: convAgents,
+          conversationHistory: activeConversation?.messages || [],
+          apiServer,
+          agentMapping
+        })
 
-            const subMsgId = `msg-${Date.now()}-${subAgent.id}-${Math.random().toString(36).slice(2, 5)}`
-            dispatch(
-              addMessage({
-                conversationId: activeConversationId,
-                message: {
-                  id: subMsgId,
-                  agentId: subAgent.id,
-                  role: 'agent',
-                  content: '',
-                  messageType: 'text',
-                  createdAt: new Date().toISOString()
-                }
-              })
-            )
-
-            try {
-              await runAgent({
-                agent: subAgent,
-                userMessage: `PM（${pmAgent.name}）分配了以下任务，请执行：\n${userText}`,
-                conversationHistory: [...(activeConversation?.messages || []), pmContext],
-                agents: convAgents,
-                apiServer,
-                onChunk: (text) => {
-                  if (abortRef.current) return
-                  dispatch({
-                    type: 'workspace/updateMessageContent',
-                    payload: {
-                      conversationId: activeConversationId,
-                      messageId: subMsgId,
-                      content: text
-                    }
-                  })
-                }
-              })
-              addEventMessage(`${subAgent.name} 完成了任务`)
-              return subAgent.name
-            } finally {
-              dispatch(setAgentRunning({ agentId: subAgent.id, running: false }))
-            }
-          })
-        )
-
-        const failed = results.map((r, i) => (r.status === 'rejected' ? subAgents[i].name : null)).filter(Boolean)
-        if (failed.length > 0) {
-          setError(`${failed.join('、')} 执行失败，请检查日志`)
-        }
+        schedulerRef.current = null
       } catch (err: any) {
         setError(err.message || '调用失败，请检查 API 配置')
         convAgents.forEach((a) => dispatch(setAgentRunning({ agentId: a.id, running: false })))
