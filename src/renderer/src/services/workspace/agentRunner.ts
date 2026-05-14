@@ -17,6 +17,7 @@ export interface AgentRunOptions {
   apiServer?: ApiServerConfig
   agentMapping?: Record<string, { agentId: string; sessionId: string }>
   knowledgeBaseId?: string
+  workDir?: string
 }
 
 export interface AgentRunResult {
@@ -117,7 +118,7 @@ async function runCodeAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       Accept: 'text/event-stream',
       'Cache-Control': 'no-cache'
     },
-    body: JSON.stringify({ content: opts.userMessage }),
+    body: JSON.stringify({ content: opts.userMessage, cwd: opts.workDir }),
     signal: abortController.signal
   })
 

@@ -1,4 +1,4 @@
-import { CheckOutlined, DatabaseOutlined, DeleteOutlined, UndoOutlined } from '@ant-design/icons'
+import { CheckOutlined, CloseOutlined, DatabaseOutlined, DeleteOutlined, UndoOutlined } from '@ant-design/icons'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import type { TaskPriority } from '@renderer/store/workspace'
 import {
@@ -180,6 +180,21 @@ const TaskBoard: FC = () => {
                     </TaskFooter>
                   )}
                   <TaskActions>
+                    {task.status === 'pending_review' && (
+                      <>
+                        <ActionBtn
+                          onClick={() => dispatch(updateTaskStatus({ taskId: task.id, status: 'completed' }))}
+                          title="审核通过">
+                          <CheckOutlined style={{ fontSize: 12 }} />
+                        </ActionBtn>
+                        <ActionBtn
+                          $danger
+                          onClick={() => dispatch(updateTaskStatus({ taskId: task.id, status: 'queued' }))}
+                          title="驳回重做">
+                          <CloseOutlined style={{ fontSize: 12 }} />
+                        </ActionBtn>
+                      </>
+                    )}
                     {task.status === 'completed' ? (
                       <ActionBtn
                         onClick={() => dispatch(updateTaskStatus({ taskId: task.id, status: 'queued' }))}

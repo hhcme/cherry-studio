@@ -49,6 +49,7 @@ export interface WorkspaceMessage {
   createdAt: string
   replyTo?: string
   toolData?: ToolCallData
+  taskData?: { taskId: string; title: string; status: TaskStatus; assignedTo: string }
 }
 
 export type TaskStatus = 'queued' | 'in_progress' | 'blocked' | 'paused' | 'pending_review' | 'completed'

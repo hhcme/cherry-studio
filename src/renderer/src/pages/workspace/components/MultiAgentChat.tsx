@@ -2,7 +2,7 @@ import { useSettings } from '@renderer/hooks/useSettings'
 import { runAgent } from '@renderer/services/workspace/agentRunner'
 import { TaskScheduler } from '@renderer/services/workspace/taskScheduler'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
-import type { WorkspaceMessage } from '@renderer/store/workspace'
+import type { TaskStatus, WorkspaceMessage } from '@renderer/store/workspace'
 import {
   addMessage,
   clearMessages,
@@ -121,6 +121,8 @@ const MultiAgentChat: FC = () => {
           agents: convAgents,
           apiServer,
           agentMapping,
+          knowledgeBaseId: activeConversation?.knowledgeBaseId,
+          workDir: activeConversation?.workDir || pmAgent.workDir,
           onChunk: (text) => {
             if (abortRef.current) return
             dispatch({
@@ -135,8 +137,26 @@ const MultiAgentChat: FC = () => {
         if (pmResult.tasks && pmResult.tasks.length > 0) {
           for (const t of pmResult.tasks) {
             dispatch(createTask({ ...t, conversationId: activeConversationId }))
+            dispatch(
+              addMessage({
+                conversationId: activeConversationId,
+                message: {
+                  id: `evt-task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                  agentId: 'system',
+                  role: 'event',
+                  content: `创建任务: ${t.title}`,
+                  messageType: 'task_create',
+                  createdAt: new Date().toISOString(),
+                  taskData: {
+                    taskId: '',
+                    title: t.title,
+                    status: 'queued',
+                    assignedTo: t.assignedTo
+                  }
+                }
+              })
+            )
           }
-          addEventMessage(`PM 创建了 ${pmResult.tasks.length} 个任务`)
         }
 
         if (subAgents.length === 0) return
@@ -146,6 +166,28 @@ const MultiAgentChat: FC = () => {
         const scheduler = new TaskScheduler({
           onTaskStatusChange: (taskId, status) => {
             dispatch(updateTaskStatus({ taskId, status }))
+            const task = tasks.find((t) => t.id === taskId)
+            if (task) {
+              dispatch(
+                addMessage({
+                  conversationId: activeConversationId,
+                  message: {
+                    id: `evt-status-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                    agentId: 'system',
+                    role: 'event',
+                    content: `${task.title} → ${status}`,
+                    messageType: 'task_update',
+                    createdAt: new Date().toISOString(),
+                    taskData: {
+                      taskId: task.id,
+                      title: task.title,
+                      status,
+                      assignedTo: task.assignedTo
+                    }
+                  }
+                })
+              )
+            }
           },
           onAgentRunning: (agentId, running) => {
             dispatch(setAgentRunning({ agentId, running }))
@@ -171,7 +213,9 @@ const MultiAgentChat: FC = () => {
           agents: convAgents,
           conversationHistory: activeConversation?.messages || [],
           apiServer,
-          agentMapping
+          agentMapping,
+          knowledgeBaseId: activeConversation?.knowledgeBaseId,
+          workDir: activeConversation?.workDir
         })
 
         schedulerRef.current = null
@@ -461,6 +505,26 @@ const MessageBubble: FC<{
   const replyAgent = replyMsg ? agents.find((a) => a.id === replyMsg.agentId) : null
 
   if (msg.role === 'event') {
+    if (msg.messageType === 'task_create' || msg.messageType === 'task_update') {
+      const td = msg.taskData
+      const taskAgent = agents.find((a) => a.id === td?.assignedTo)
+      return (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
+          <TaskCardMessage>
+            <TaskCardIcon>
+              {msg.messageType === 'task_create' ? '📋' : STATUS_EMOJI[td?.status || 'queued']}
+            </TaskCardIcon>
+            <TaskCardBody>
+              <TaskCardTitle>{td?.title || msg.content}</TaskCardTitle>
+              <TaskCardMeta>
+                <StatusBadge $status={td?.status || 'queued'}>{TASK_STATUS_LABEL[td?.status || 'queued']}</StatusBadge>
+                {taskAgent && <span style={{ marginLeft: 6 }}>{taskAgent.name}</span>}
+              </TaskCardMeta>
+            </TaskCardBody>
+          </TaskCardMessage>
+        </motion.div>
+      )
+    }
     return (
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
         <EventMessage>{msg.content}</EventMessage>
@@ -536,6 +600,24 @@ const MessageBubble: FC<{
       </AgentBubble>
     </motion.div>
   )
+}
+
+const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
+  queued: '排队中',
+  in_progress: '执行中',
+  blocked: '已阻塞',
+  paused: '已暂停',
+  pending_review: '待审核',
+  completed: '已完成'
+}
+
+const STATUS_EMOJI: Record<string, string> = {
+  queued: '⏳',
+  in_progress: '⚡',
+  blocked: '🚫',
+  paused: '⏸️',
+  pending_review: '🔍',
+  completed: '✅'
 }
 
 function formatTime(isoStr: string): string {
@@ -705,6 +787,85 @@ const EventMessage = styled.div`
   border-radius: 12px;
   margin: 0 auto;
   max-width: 300px;
+`
+
+const TaskCardMessage = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--color-background-soft);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  margin: 0 auto;
+  max-width: 380px;
+`
+
+const TaskCardIcon = styled.span`
+  font-size: 18px;
+  flex-shrink: 0;
+`
+
+const TaskCardBody = styled.div`
+  flex: 1;
+  min-width: 0;
+`
+
+const TaskCardTitle = styled.div`
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+`
+
+const TaskCardMeta = styled.div`
+  display: flex;
+  align-items: center;
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  margin-top: 2px;
+`
+
+const StatusBadge = styled.span<{ $status: TaskStatus }>`
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  background: ${({ $status }) => {
+    switch ($status) {
+      case 'completed':
+        return '#52c41a20'
+      case 'in_progress':
+        return '#1677ff20'
+      case 'blocked':
+        return '#ff4d4f20'
+      case 'pending_review':
+        return '#faad1420'
+      case 'paused':
+        return '#8c8c8c20'
+      default:
+        return '#d9d9d920'
+    }
+  }};
+  color: ${({ $status }) => {
+    switch ($status) {
+      case 'completed':
+        return '#52c41a'
+      case 'in_progress':
+        return '#1677ff'
+      case 'blocked':
+        return '#ff4d4f'
+      case 'pending_review':
+        return '#faad14'
+      case 'paused':
+        return '#8c8c8c'
+      default:
+        return '#8c8c8c'
+    }
+  }};
 `
 
 const UserBubble = styled.div`

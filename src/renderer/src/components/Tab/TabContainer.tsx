@@ -35,6 +35,7 @@ import {
   Sparkle,
   Sun,
   Terminal,
+  Workflow,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo } from 'react'
@@ -111,6 +112,8 @@ const getTabIcon = (
       return <Settings size={14} />
     case 'code':
       return <Terminal size={14} />
+    case 'workspace':
+      return <Workflow size={14} />
     case 'openclaw':
       return <OpenClawIcon style={{ width: 14, height: 14 }} />
     default:

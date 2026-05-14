@@ -155,7 +155,8 @@ const titleKeyMap = {
   settings: 'title.settings',
   translate: 'title.translate',
   openclaw: 'openclaw.title',
-  agents: 'agent.sidebar_title'
+  agents: 'agent.sidebar_title',
+  workspace: 'workspace.title'
 } as const
 
 export const getTitleLabel = (key: string): string => {
