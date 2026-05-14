@@ -15,6 +15,8 @@ import { CheckCircle, Circle, Clock, FileText, FolderTree, Globe, ListChecks, Pa
 import type { FC } from 'react'
 import { styled } from 'styled-components'
 
+import AutomationPanel from './AutomationPanel'
+import BrowserPanel from './BrowserPanel'
 import DocumentEditorPanel from './DocumentEditorPanel'
 import FileBrowserPanel from './FileBrowserPanel'
 
@@ -83,7 +85,11 @@ const ToolPanel: FC = () => {
                   {rightPanel === 'files' && <FileBrowserPanel />}
                   {rightPanel === 'editor' && <DocumentEditorPanel />}
                   {rightPanel === 'knowledge' && <KnowledgePanel />}
-                  {!['tasks', 'agents', 'files', 'editor', 'knowledge'].includes(rightPanel) && (
+                  {rightPanel === 'browser' && <BrowserPanel />}
+                  {rightPanel === 'automation' && <AutomationPanel />}
+                  {!['tasks', 'agents', 'files', 'editor', 'knowledge', 'browser', 'automation'].includes(
+                    rightPanel
+                  ) && (
                     <Placeholder>
                       <p>{panels.find((p) => p.id === rightPanel)?.label}</p>
                       <span>（待实现）</span>

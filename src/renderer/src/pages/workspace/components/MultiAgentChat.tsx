@@ -27,13 +27,12 @@ const AGENT_COLOR_MAP: Record<string, string> = {
 
 const MultiAgentChat: FC = () => {
   const dispatch = useAppDispatch()
-  const { conversations, activeConversationId, agents } = useAppSelector((s) => s.workspace)
+  const { conversations, activeConversationId, agents, tasks } = useAppSelector((s) => s.workspace)
   const agentRunning = useAppSelector((s) => s.workspace.agentRunning)
   const agentAction = useAppSelector((s) => s.workspace.agentAction)
   const { apiServer } = useSettings()
   const [input, setInput] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [, setStreamingId] = useState<string | null>(null)
   const [visibleCount, setVisibleCount] = useState(50)
   const [replyTo, setReplyTo] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -77,7 +76,7 @@ const MultiAgentChat: FC = () => {
       const pmAgent = convAgents.find((a) => a.isMain) || convAgents[0]
       if (!pmAgent) return
 
-      const subAgents = convAgents.filter((a) => a.id !== pmAgent.id && a.agentType === 'chat')
+      const subAgents = convAgents.filter((a) => a.id !== pmAgent.id)
 
       try {
         dispatch(setAgentRunning({ agentId: pmAgent.id, running: true }))
@@ -85,7 +84,6 @@ const MultiAgentChat: FC = () => {
         setError(null)
 
         const pmMsgId = `msg-${Date.now()}-pm`
-        setStreamingId(pmMsgId)
         dispatch(
           addMessage({
             conversationId: activeConversationId,
@@ -117,7 +115,6 @@ const MultiAgentChat: FC = () => {
         })
 
         dispatch(setAgentRunning({ agentId: pmAgent.id, running: false }))
-        setStreamingId(null)
 
         if (pmResult.tasks && pmResult.tasks.length > 0) {
           for (const t of pmResult.tasks) {
@@ -126,66 +123,73 @@ const MultiAgentChat: FC = () => {
           addEventMessage(`PM 创建了 ${pmResult.tasks.length} 个任务`)
         }
 
-        for (const subAgent of subAgents) {
-          if (abortRef.current) break
+        if (subAgents.length === 0) return
 
-          dispatch(setAgentRunning({ agentId: subAgent.id, running: true }))
-          dispatch(setAgentAction({ agentId: subAgent.id, action: '正在执行任务...' }))
-          addEventMessage(`${subAgent.name} 开始工作`)
+        addEventMessage(`${subAgents.map((a) => a.name).join('、')} 开始并行工作`)
 
-          const subMsgId = `msg-${Date.now()}-${subAgent.id}`
-          setStreamingId(subMsgId)
-          dispatch(
-            addMessage({
-              conversationId: activeConversationId,
-              message: {
-                id: subMsgId,
-                agentId: subAgent.id,
-                role: 'agent',
-                content: '',
-                messageType: 'text',
-                createdAt: new Date().toISOString()
-              }
-            })
-          )
+        const pmContext: WorkspaceMessage = {
+          id: 'ctx-pm',
+          agentId: pmAgent.id,
+          role: 'agent',
+          content: pmResult.content,
+          messageType: 'text',
+          createdAt: new Date().toISOString()
+        }
 
-          await runAgent({
-            agent: subAgent,
-            userMessage: `PM（${pmAgent.name}）分配了以下任务，请执行：\n${userText}`,
-            conversationHistory: [
-              ...(activeConversation?.messages || []),
-              {
-                id: 'ctx-pm',
-                agentId: pmAgent.id,
-                role: 'agent',
-                content: pmResult.content,
-                messageType: 'text',
-                createdAt: new Date().toISOString()
-              }
-            ],
-            agents: convAgents,
-            apiServer,
-            onChunk: (text) => {
-              if (abortRef.current) return
-              dispatch({
-                type: 'workspace/updateMessageContent',
-                payload: {
-                  conversationId: activeConversationId,
-                  messageId: subMsgId,
-                  content: text
+        const results = await Promise.allSettled(
+          subAgents.map(async (subAgent) => {
+            dispatch(setAgentRunning({ agentId: subAgent.id, running: true }))
+            dispatch(setAgentAction({ agentId: subAgent.id, action: '正在执行任务...' }))
+
+            const subMsgId = `msg-${Date.now()}-${subAgent.id}-${Math.random().toString(36).slice(2, 5)}`
+            dispatch(
+              addMessage({
+                conversationId: activeConversationId,
+                message: {
+                  id: subMsgId,
+                  agentId: subAgent.id,
+                  role: 'agent',
+                  content: '',
+                  messageType: 'text',
+                  createdAt: new Date().toISOString()
                 }
               })
+            )
+
+            try {
+              await runAgent({
+                agent: subAgent,
+                userMessage: `PM（${pmAgent.name}）分配了以下任务，请执行：\n${userText}`,
+                conversationHistory: [...(activeConversation?.messages || []), pmContext],
+                agents: convAgents,
+                apiServer,
+                onChunk: (text) => {
+                  if (abortRef.current) return
+                  dispatch({
+                    type: 'workspace/updateMessageContent',
+                    payload: {
+                      conversationId: activeConversationId,
+                      messageId: subMsgId,
+                      content: text
+                    }
+                  })
+                }
+              })
+              addEventMessage(`${subAgent.name} 完成了任务`)
+              return subAgent.name
+            } finally {
+              dispatch(setAgentRunning({ agentId: subAgent.id, running: false }))
             }
           })
+        )
 
-          dispatch(setAgentRunning({ agentId: subAgent.id, running: false }))
-          setStreamingId(null)
-          addEventMessage(`${subAgent.name} 完成了任务`)
+        const failed = results.map((r, i) => (r.status === 'rejected' ? subAgents[i].name : null)).filter(Boolean)
+        if (failed.length > 0) {
+          setError(`${failed.join('、')} 执行失败，请检查日志`)
         }
       } catch (err: any) {
         setError(err.message || '调用失败，请检查 API 配置')
         convAgents.forEach((a) => dispatch(setAgentRunning({ agentId: a.id, running: false })))
-        setStreamingId(null)
       }
     },
     [activeConversationId, convAgents, activeConversation, dispatch, replyTo, addEventMessage, apiServer]
@@ -215,21 +219,37 @@ const MultiAgentChat: FC = () => {
     void executeAgentChain(text)
   }
 
-  const handleExportMarkdown = () => {
-    if (!activeConversation) return
+  const buildMarkdown = useCallback(() => {
+    if (!activeConversation) return ''
     const lines = [`# ${activeConversation.name}`, '']
     for (const msg of messages) {
       const agent = agents.find((a) => a.id === msg.agentId)
       const sender = msg.role === 'user' ? '用户' : msg.role === 'event' ? '系统' : agent?.name || 'Agent'
       lines.push(`## ${sender} (${formatTime(msg.createdAt)})`, '', msg.content, '')
     }
-    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
+    return lines.join('\n')
+  }, [activeConversation, messages, agents])
+
+  const handleExportMarkdown = () => {
+    if (!activeConversation) return
+    const md = buildMarkdown()
+    const blob = new Blob([md], { type: 'text/markdown' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = `${activeConversation.name}.md`
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  const handleExportWord = async () => {
+    if (!activeConversation) return
+    const md = buildMarkdown()
+    try {
+      await window.api.export.toWord(md, activeConversation.name)
+    } catch (err: any) {
+      setError(err.message || 'Word 导出失败')
+    }
   }
 
   const handleExportJSON = () => {
@@ -255,9 +275,70 @@ const MultiAgentChat: FC = () => {
     URL.revokeObjectURL(url)
   }
 
+  const handleExportTaskReport = () => {
+    const convTasks = tasks.filter((t) => t.conversationId === activeConversationId)
+    if (convTasks.length === 0) {
+      setError('当前对话暂无任务')
+      return
+    }
+    const lines = [
+      `# 任务报告 — ${activeConversation?.name || ''}`,
+      '',
+      `生成时间: ${new Date().toLocaleString('zh-CN')}`,
+      '',
+      '## 总览',
+      '',
+      `- 总任务数: ${convTasks.length}`,
+      `- 已完成: ${convTasks.filter((t) => t.status === 'completed').length}`,
+      `- 进行中: ${convTasks.filter((t) => t.status === 'in_progress').length}`,
+      `- 待处理: ${convTasks.filter((t) => t.status === 'queued').length}`,
+      '',
+      '## 任务列表',
+      '',
+      '| # | 任务 | 状态 | 优先级 | 负责人 | 依赖 |',
+      '|---|------|------|--------|--------|------|'
+    ]
+    convTasks.forEach((t, i) => {
+      const agent = agents.find((a) => a.id === t.assignedTo)
+      const deps = t.dependsOn.map((d) => tasks.find((tt) => tt.id === d)?.title || d).join(', ')
+      lines.push(`| ${i + 1} | ${t.title} | ${t.status} | ${t.priority} | ${agent?.name || '-'} | ${deps || '-'} |`)
+    })
+    lines.push('', '---', '', '## 详情', '')
+    convTasks.forEach((t) => {
+      const agent = agents.find((a) => a.id === t.assignedTo)
+      lines.push(
+        `### ${t.title}`,
+        '',
+        `- 状态: ${t.status}`,
+        `- 优先级: ${t.priority}`,
+        `- 负责人: ${agent?.name || '-'}`
+      )
+      if (t.description) lines.push(`- 描述: ${t.description}`)
+      if (t.dependsOn.length > 0) {
+        const deps = t.dependsOn.map((d) => tasks.find((tt) => tt.id === d)?.title || d).join(', ')
+        lines.push(`- 依赖: ${deps}`)
+      }
+      lines.push('')
+    })
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `任务报告_${activeConversation?.name || ''}.md`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const moreMenuItems: MenuProps['items'] = [
     { key: 'export-md', label: '导出 Markdown', icon: <Download size={14} />, onClick: handleExportMarkdown },
     { key: 'export-json', label: '导出 JSON', icon: <Download size={14} />, onClick: handleExportJSON },
+    { key: 'export-word', label: '导出 Word', icon: <Download size={14} />, onClick: () => void handleExportWord() },
+    {
+      key: 'export-tasks',
+      label: '导出任务报告',
+      icon: <Download size={14} />,
+      onClick: handleExportTaskReport
+    },
     { type: 'divider' },
     {
       key: 'clear',
