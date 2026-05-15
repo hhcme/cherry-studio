@@ -1,4 +1,4 @@
-import type { TaskStatus, WorkspaceAgent, WorkspaceTask } from '@renderer/store/workspace'
+import type { TaskStatus, WorkspaceAgent, WorkspaceMessage, WorkspaceTask } from '@renderer/store/workspace'
 
 import type { AgentRunOptions } from './agentRunner'
 import { runAgent } from './agentRunner'
@@ -9,7 +9,7 @@ export interface TaskSchedulerCallbacks {
   onAgentAction: (agentId: string, action: string) => void
   onAddMessage: (
     conversationId: string,
-    message: { id: string; agentId: string; role: 'agent'; content: string; messageType: 'text'; createdAt: string }
+    message: Omit<WorkspaceMessage, 'roundNumber'> & { roundNumber?: number }
   ) => void
   onUpdateMessageContent: (conversationId: string, messageId: string, content: string) => void
   onAddEventMessage: (text: string) => void
@@ -76,9 +76,10 @@ export class TaskScheduler {
         this.callbacks.onAddMessage(conversationId, {
           id: msgId,
           agentId: agent.id,
-          role: 'agent',
+          role: 'assistant',
           content: '',
           messageType: 'text',
+          roundNumber: 0,
           createdAt: new Date().toISOString()
         })
 
@@ -102,7 +103,7 @@ export class TaskScheduler {
         } catch (err: any) {
           if (!this.aborted) {
             this.callbacks.onTaskStatusChange(task.id, 'blocked')
-            this.callbacks.onUpdateMessageContent(conversationId, msgId, `错误: ${err.message}`)
+            this.callbacks.onUpdateMessageContent(conversationId, msgId, `⚠️ 执行失败: ${err.message || '未知错误'}`)
             this.callbacks.onAddEventMessage(`✗ ${task.title} 失败: ${err.message}`)
           }
         } finally {

@@ -3439,10 +3439,98 @@ const migrateConfig = {
         state.tabs.tabs.splice(insertIndex, 0, { id: 'workspace', path: '/workspace' })
       }
 
+      // Ensure workspace slice has all required fields for v2 turn-based model
+      if (state.workspace) {
+        if (state.workspace.roundCount === undefined) state.workspace.roundCount = 0
+        if (state.workspace.currentTurn === undefined) state.workspace.currentTurn = 'user'
+        if (state.workspace.isProcessing === undefined) state.workspace.isProcessing = false
+        if (state.workspace.pendingAgents === undefined) state.workspace.pendingAgents = []
+        if (state.workspace.agentRunning === undefined) state.workspace.agentRunning = {}
+        if (state.workspace.agentAction === undefined) state.workspace.agentAction = {}
+        if (state.workspace.activeFile === undefined) state.workspace.activeFile = null
+        if (state.workspace.leftPanelCollapsed === undefined) state.workspace.leftPanelCollapsed = false
+        if (!state.workspace.agents) {
+          state.workspace.agents = []
+        }
+        state.workspace.agents.forEach((agent: any) => {
+          if (agent.color === undefined) agent.color = 'blue'
+          if (agent.agentType === undefined) agent.agentType = 'chat'
+          if (agent.status === undefined) agent.status = 'active'
+          if (agent.isMain === undefined) agent.isMain = false
+          if (agent.permissionMode === undefined) agent.permissionMode = 'default'
+        })
+        if (!state.workspace.conversations) {
+          state.workspace.conversations = []
+        }
+        state.workspace.conversations.forEach((conv: any) => {
+          if (!conv.messages) conv.messages = []
+          if (!conv.agentIds) conv.agentIds = []
+          conv.messages.forEach((msg: any) => {
+            if (msg.roundNumber === undefined) msg.roundNumber = 0
+          })
+        })
+        if (!state.workspace.tasks) {
+          state.workspace.tasks = []
+        }
+        state.workspace.tasks.forEach((task: any) => {
+          if (task.dependsOn === undefined) task.dependsOn = []
+          if (task.priority === undefined) task.priority = 'normal'
+          if (task.status === undefined) task.status = 'queued'
+        })
+      }
+
       logger.info('migrate 207 success')
       return state
     } catch (error) {
       logger.error('migrate 207 error', error as Error)
+      return state
+    }
+  },
+  '208': (state: RootState) => {
+    try {
+      if (state.workspace) {
+        if (state.workspace.roundCount === undefined) state.workspace.roundCount = 0
+        if (state.workspace.currentTurn === undefined) state.workspace.currentTurn = 'user'
+        if (state.workspace.isProcessing === undefined) state.workspace.isProcessing = false
+        if (state.workspace.pendingAgents === undefined) state.workspace.pendingAgents = []
+        if (state.workspace.agentRunning === undefined) state.workspace.agentRunning = {}
+        if (state.workspace.agentAction === undefined) state.workspace.agentAction = {}
+        if (state.workspace.activeFile === undefined) state.workspace.activeFile = null
+        if (state.workspace.leftPanelCollapsed === undefined) state.workspace.leftPanelCollapsed = false
+        if (!state.workspace.agents) {
+          state.workspace.agents = []
+        }
+        state.workspace.agents.forEach((agent: any) => {
+          if (agent.color === undefined) agent.color = 'blue'
+          if (agent.agentType === undefined) agent.agentType = 'chat'
+          if (agent.status === undefined) agent.status = 'active'
+          if (agent.isMain === undefined) agent.isMain = false
+          if (agent.permissionMode === undefined) agent.permissionMode = 'default'
+        })
+        if (!state.workspace.conversations) {
+          state.workspace.conversations = []
+        }
+        state.workspace.conversations.forEach((conv: any) => {
+          if (!conv.messages) conv.messages = []
+          if (!conv.agentIds) conv.agentIds = []
+          conv.messages.forEach((msg: any) => {
+            if (msg.roundNumber === undefined) msg.roundNumber = 0
+          })
+        })
+        if (!state.workspace.tasks) {
+          state.workspace.tasks = []
+        }
+        state.workspace.tasks.forEach((task: any) => {
+          if (task.dependsOn === undefined) task.dependsOn = []
+          if (task.priority === undefined) task.priority = 'normal'
+          if (task.status === undefined) task.status = 'queued'
+        })
+      }
+
+      logger.info('migrate 208 success')
+      return state
+    } catch (error) {
+      logger.error('migrate 208 error', error as Error)
       return state
     }
   }

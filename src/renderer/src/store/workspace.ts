@@ -4,6 +4,10 @@ export type AgentType = 'chat' | 'code'
 export type AgentStatus = 'active' | 'paused'
 export type TaskPriority = 'normal' | 'high' | 'urgent'
 export type PermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
+export type TurnRole = 'user' | 'agent'
+export type MessageRole = 'user' | 'assistant' | 'system'
+export type MessageStatus = 'pending' | 'claimed' | 'generating' | 'completed'
+export type MessageType = 'text' | 'task_create' | 'task_update' | 'tool_call' | 'tool_result' | 'dispatch'
 
 export interface WorkspaceAgent {
   id: string
@@ -43,11 +47,16 @@ export interface ToolCallData {
 export interface WorkspaceMessage {
   id: string
   agentId: string
-  role: 'user' | 'agent' | 'event'
+  role: MessageRole
   content: string
-  messageType: 'text' | 'task_create' | 'task_update' | 'tool_call' | 'tool_result'
+  messageType: MessageType
   createdAt: string
   replyTo?: string
+  mentions?: string[]
+  roundNumber: number
+  taskId?: string
+  status?: MessageStatus
+  agentAction?: string
   toolData?: ToolCallData
   taskData?: { taskId: string; title: string; status: TaskStatus; assignedTo: string }
 }
@@ -66,6 +75,8 @@ export interface WorkspaceTask {
   createdAt: string
 }
 
+const MAX_ROUNDS = 50
+
 export interface WorkspaceState {
   agents: WorkspaceAgent[]
   conversations: WorkspaceConversation[]
@@ -76,6 +87,10 @@ export interface WorkspaceState {
   agentRunning: Record<string, boolean>
   agentAction: Record<string, string>
   activeFile: string | null
+  roundCount: number
+  currentTurn: TurnRole
+  isProcessing: boolean
+  pendingAgents: string[]
 }
 
 const AGENT_COLORS = ['blue', 'purple', 'emerald', 'orange', 'pink', 'cyan', 'amber', 'rose']
@@ -142,7 +157,11 @@ const initialState: WorkspaceState = {
   leftPanelCollapsed: false,
   agentRunning: {},
   agentAction: {},
-  activeFile: null
+  activeFile: null,
+  roundCount: 0,
+  currentTurn: 'user',
+  isProcessing: false,
+  pendingAgents: []
 }
 
 const STATUS_ORDER: TaskStatus[] = ['queued', 'in_progress', 'blocked', 'paused', 'pending_review', 'completed']
@@ -180,9 +199,67 @@ const workspaceSlice = createSlice({
       state.activeConversationId = action.payload
     },
 
-    addMessage(state, action: PayloadAction<{ conversationId: string; message: WorkspaceMessage }>) {
+    addMessage(
+      state,
+      action: PayloadAction<{
+        conversationId: string
+        message: Partial<WorkspaceMessage> & {
+          id: string
+          role: MessageRole
+          content: string
+          messageType: MessageType
+          createdAt: string
+        }
+      }>
+    ) {
       const conv = state.conversations.find((c) => c.id === action.payload.conversationId)
-      if (conv) conv.messages.push(action.payload.message)
+      if (conv) {
+        const existingIndex = conv.messages.findIndex((m) => m.id === action.payload.message.id)
+        if (existingIndex >= 0) {
+          conv.messages[existingIndex] = {
+            ...conv.messages[existingIndex],
+            ...action.payload.message
+          }
+        } else {
+          const msg: WorkspaceMessage = {
+            agentId: 'system',
+            roundNumber: state.roundCount,
+            ...action.payload.message
+          }
+          conv.messages.push(msg)
+        }
+      }
+    },
+
+    startNewRound(state) {
+      state.roundCount += 1
+      state.currentTurn = 'agent'
+      state.isProcessing = true
+      state.pendingAgents = []
+    },
+
+    completeRound(state) {
+      state.currentTurn = 'user'
+      state.isProcessing = false
+      state.pendingAgents = []
+    },
+
+    setPendingAgents(state, action: PayloadAction<string[]>) {
+      state.pendingAgents = action.payload
+    },
+
+    removePendingAgent(state, action: PayloadAction<string>) {
+      state.pendingAgents = state.pendingAgents.filter((id) => id !== action.payload)
+      if (state.pendingAgents.length === 0) {
+        state.currentTurn = 'user'
+        state.isProcessing = false
+      }
+    },
+
+    forceTerminate(state) {
+      state.currentTurn = 'user'
+      state.isProcessing = false
+      state.pendingAgents = []
     },
 
     addAgent(
@@ -214,6 +291,8 @@ const workspaceSlice = createSlice({
     },
 
     removeAgent(state, action: PayloadAction<string>) {
+      const agent = state.agents.find((a) => a.id === action.payload)
+      if (agent?.isMain) return
       state.agents = state.agents.filter((a) => a.id !== action.payload)
       state.conversations.forEach((c) => {
         c.agentIds = c.agentIds.filter((id) => id !== action.payload)
@@ -239,6 +318,7 @@ const workspaceSlice = createSlice({
 
     pauseAgent(state, action: PayloadAction<string>) {
       const agent = state.agents.find((a) => a.id === action.payload)
+      if (agent?.isMain) return
       if (agent) agent.status = 'paused'
     },
 
@@ -255,6 +335,8 @@ const workspaceSlice = createSlice({
     },
 
     removeAgentFromConversation(state, action: PayloadAction<{ conversationId: string; agentId: string }>) {
+      const agent = state.agents.find((a) => a.id === action.payload.agentId)
+      if (agent?.isMain) return
       const conv = state.conversations.find((c) => c.id === action.payload.conversationId)
       if (conv) {
         conv.agentIds = conv.agentIds.filter((id) => id !== action.payload.agentId)
@@ -270,10 +352,11 @@ const workspaceSlice = createSlice({
         conversationId: string
         priority?: TaskPriority
         dependsOn?: string[]
+        _taskId?: string
       }>
     ) {
       state.tasks.push({
-        id: `task-${Date.now()}`,
+        id: action.payload._taskId || `task-${Date.now()}`,
         title: action.payload.title,
         description: action.payload.description,
         status: 'queued',
@@ -363,6 +446,11 @@ export const {
   renameConversation,
   setActiveConversation,
   addMessage,
+  startNewRound,
+  completeRound,
+  setPendingAgents,
+  removePendingAgent,
+  forceTerminate,
   addAgent,
   removeAgent,
   cloneAgent,
@@ -387,4 +475,5 @@ export const {
   setActiveFile
 } = workspaceSlice.actions
 
+export { MAX_ROUNDS }
 export default workspaceSlice.reducer

@@ -168,7 +168,7 @@ const TaskBoard: FC = () => {
                     </PriorityTag>
                   </TaskHeader>
                   {task.description && <TaskDesc>{task.description}</TaskDesc>}
-                  {task.dependsOn.length > 0 && (
+                  {task.dependsOn?.length > 0 && (
                     <DepInfo>
                       依赖: {task.dependsOn.map((d) => tasks.find((t) => t.id === d)?.title || d).join(', ')}
                     </DepInfo>

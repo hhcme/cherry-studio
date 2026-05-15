@@ -1,22 +1,26 @@
 import { useSettings } from '@renderer/hooks/useSettings'
-import { runAgent } from '@renderer/services/workspace/agentRunner'
-import { TaskScheduler } from '@renderer/services/workspace/taskScheduler'
+import { Orchestrator } from '@renderer/services/workspace/orchestrator'
 import { useAppDispatch, useAppSelector } from '@renderer/store'
 import type { TaskStatus, WorkspaceMessage } from '@renderer/store/workspace'
 import {
   addMessage,
   clearMessages,
+  completeRound,
   createTask,
+  forceTerminate,
   setAgentAction,
   setAgentRunning,
+  setRightPanel,
+  startNewRound,
+  updateMessageContent,
   updateTaskStatus
 } from '@renderer/store/workspace'
 import type { MenuProps } from 'antd'
 import { Dropdown } from 'antd'
 import { motion } from 'framer-motion'
-import { AlertTriangle, Download, Loader2, MoreVertical, Send, Trash2 } from 'lucide-react'
+import { AlertTriangle, Download, Loader2, MoreVertical, Pause, Search, Send, Trash2, X } from 'lucide-react'
 import type { FC } from 'react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { styled } from 'styled-components'
 
 import ToolOutputBubble from './ToolOutputBubble'
@@ -43,13 +47,17 @@ const MultiAgentChat: FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [visibleCount, setVisibleCount] = useState(50)
   const [replyTo, setReplyTo] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [isSearchOpen, setIsSearchOpen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const abortRef = useRef(false)
-  const schedulerRef = useRef<TaskScheduler | null>(null)
+  const orchestratorRef = useRef<Orchestrator | null>(null)
+  const loadMoreRef = useRef<HTMLDivElement>(null)
+  const sendingRef = useRef(false)
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId)
   const messages = activeConversation?.messages || []
   const convAgents = agents.filter((a) => a.status === 'active' && activeConversation?.agentIds.includes(a.id))
+  const roundCount = useAppSelector((s) => s.workspace.roundCount)
 
   const isRunning = Object.values(agentRunning).some(Boolean)
 
@@ -57,35 +65,43 @@ const MultiAgentChat: FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages.length])
 
-  const addEventMessage = useCallback(
-    (text: string) => {
-      if (!activeConversationId) return
-      dispatch(
-        addMessage({
-          conversationId: activeConversationId,
-          message: {
-            id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            agentId: 'system',
-            role: 'event',
-            content: text,
-            messageType: 'text',
-            createdAt: new Date().toISOString()
-          }
-        })
-      )
-    },
-    [activeConversationId, dispatch]
-  )
+  useEffect(() => {
+    const el = loadMoreRef.current
+    if (!el) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleCount((c) => Math.min(c + 50, messages.length))
+        }
+      },
+      { threshold: 0.1 }
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [messages.length])
+
+  const filteredMessages = useMemo(() => {
+    if (!searchQuery) return messages
+    const q = searchQuery.toLowerCase()
+    return messages.filter(
+      (m) =>
+        m.content.toLowerCase().includes(q) ||
+        agents
+          .find((a) => a.id === m.agentId)
+          ?.name.toLowerCase()
+          .includes(q)
+    )
+  }, [messages, searchQuery, agents])
 
   const executeAgentChain = useCallback(
     async (userText: string) => {
       if (!activeConversationId) return
-      abortRef.current = false
 
-      const pmAgent = convAgents.find((a) => a.isMain) || convAgents[0]
-      if (!pmAgent) return
+      if (orchestratorRef.current?.running) {
+        console.warn('[MultiAgentChat] Orchestrator already running, skipping')
+        return
+      }
 
-      const subAgents = convAgents.filter((a) => a.id !== pmAgent.id)
       const agentMapping: Record<string, { agentId: string; sessionId: string }> = {}
       for (const a of convAgents) {
         if (a.mappedAgentId && a.mappedSessionId) {
@@ -93,143 +109,44 @@ const MultiAgentChat: FC = () => {
         }
       }
 
-      try {
-        dispatch(setAgentRunning({ agentId: pmAgent.id, running: true }))
-        dispatch(setAgentAction({ agentId: pmAgent.id, action: '正在分析需求...' }))
-        setError(null)
+      const orchestrator = new Orchestrator({
+        dispatch: (action) => dispatch(action),
+        addMessage: (payload) => dispatch(addMessage(payload)),
+        updateMessageContent: (convId, msgId, content) =>
+          dispatch(updateMessageContent({ conversationId: convId, messageId: msgId, content })),
+        createTask: (t) => dispatch(createTask(t)),
+        updateTaskStatus: (p) => dispatch(updateTaskStatus(p)),
+        setAgentRunning: (p) => dispatch(setAgentRunning(p)),
+        setAgentAction: (p) => dispatch(setAgentAction(p)),
+        startNewRound: () => startNewRound(),
+        completeRound: () => completeRound(),
+        forceTerminate: () => forceTerminate(),
+        setError
+      })
+      orchestratorRef.current = orchestrator
 
-        const pmMsgId = `msg-${Date.now()}-pm`
-        dispatch(
-          addMessage({
-            conversationId: activeConversationId,
-            message: {
-              id: pmMsgId,
-              agentId: pmAgent.id,
-              role: 'agent',
-              content: '',
-              messageType: 'text',
-              createdAt: new Date().toISOString(),
-              replyTo: replyTo || undefined
-            }
-          })
-        )
+      await orchestrator.runRound(userText, {
+        conversationId: activeConversationId,
+        agents: convAgents,
+        conversationHistory: activeConversation?.messages || [],
+        existingTasks: tasks,
+        roundCount,
+        apiServer,
+        agentMapping,
+        knowledgeBaseId: activeConversation?.knowledgeBaseId,
+        workDir: activeConversation?.workDir
+      })
 
-        const pmResult = await runAgent({
-          agent: pmAgent,
-          userMessage: userText,
-          conversationHistory: activeConversation?.messages || [],
-          agents: convAgents,
-          apiServer,
-          agentMapping,
-          knowledgeBaseId: activeConversation?.knowledgeBaseId,
-          workDir: activeConversation?.workDir || pmAgent.workDir,
-          onChunk: (text) => {
-            if (abortRef.current) return
-            dispatch({
-              type: 'workspace/updateMessageContent',
-              payload: { conversationId: activeConversationId, messageId: pmMsgId, content: text }
-            })
-          }
-        })
-
-        dispatch(setAgentRunning({ agentId: pmAgent.id, running: false }))
-
-        if (pmResult.tasks && pmResult.tasks.length > 0) {
-          for (const t of pmResult.tasks) {
-            dispatch(createTask({ ...t, conversationId: activeConversationId }))
-            dispatch(
-              addMessage({
-                conversationId: activeConversationId,
-                message: {
-                  id: `evt-task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  agentId: 'system',
-                  role: 'event',
-                  content: `创建任务: ${t.title}`,
-                  messageType: 'task_create',
-                  createdAt: new Date().toISOString(),
-                  taskData: {
-                    taskId: '',
-                    title: t.title,
-                    status: 'queued',
-                    assignedTo: t.assignedTo
-                  }
-                }
-              })
-            )
-          }
-        }
-
-        if (subAgents.length === 0) return
-
-        addEventMessage(`开始执行任务（按依赖顺序，每 Agent 串行）`)
-
-        const scheduler = new TaskScheduler({
-          onTaskStatusChange: (taskId, status) => {
-            dispatch(updateTaskStatus({ taskId, status }))
-            const task = tasks.find((t) => t.id === taskId)
-            if (task) {
-              dispatch(
-                addMessage({
-                  conversationId: activeConversationId,
-                  message: {
-                    id: `evt-status-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                    agentId: 'system',
-                    role: 'event',
-                    content: `${task.title} → ${status}`,
-                    messageType: 'task_update',
-                    createdAt: new Date().toISOString(),
-                    taskData: {
-                      taskId: task.id,
-                      title: task.title,
-                      status,
-                      assignedTo: task.assignedTo
-                    }
-                  }
-                })
-              )
-            }
-          },
-          onAgentRunning: (agentId, running) => {
-            dispatch(setAgentRunning({ agentId, running }))
-          },
-          onAgentAction: (agentId, action) => {
-            dispatch(setAgentAction({ agentId, action }))
-          },
-          onAddMessage: (convId, message) => {
-            dispatch(addMessage({ conversationId: convId, message }))
-          },
-          onUpdateMessageContent: (convId, messageId, content) => {
-            dispatch({
-              type: 'workspace/updateMessageContent',
-              payload: { conversationId: convId, messageId, content }
-            })
-          },
-          onAddEventMessage: (text) => addEventMessage(text)
-        })
-        schedulerRef.current = scheduler
-
-        const convTasks = tasks.filter((t) => t.conversationId === activeConversationId)
-        await scheduler.executeTasks(convTasks, convAgents, activeConversationId, activeConversation?.messages || [], {
-          agents: convAgents,
-          conversationHistory: activeConversation?.messages || [],
-          apiServer,
-          agentMapping,
-          knowledgeBaseId: activeConversation?.knowledgeBaseId,
-          workDir: activeConversation?.workDir
-        })
-
-        schedulerRef.current = null
-      } catch (err: any) {
-        setError(err.message || '调用失败，请检查 API 配置')
-        convAgents.forEach((a) => dispatch(setAgentRunning({ agentId: a.id, running: false })))
-      }
+      orchestratorRef.current = null
     },
-    [activeConversationId, convAgents, activeConversation, dispatch, replyTo, addEventMessage, apiServer]
+    [activeConversationId, convAgents, activeConversation, dispatch, tasks, roundCount, apiServer]
   )
 
   const handleSend = () => {
     const text = input.trim()
-    if (!text || !activeConversationId || isRunning) return
+    if (!text || !activeConversationId || isRunning || sendingRef.current) return
+
+    sendingRef.current = true
 
     dispatch(
       addMessage({
@@ -240,6 +157,7 @@ const MultiAgentChat: FC = () => {
           role: 'user',
           content: text,
           messageType: 'text',
+          roundNumber: roundCount + 1,
           createdAt: new Date().toISOString()
         }
       })
@@ -247,8 +165,15 @@ const MultiAgentChat: FC = () => {
 
     setInput('')
     setReplyTo(null)
+    setSearchQuery('')
     setVisibleCount(50)
-    void executeAgentChain(text)
+    void executeAgentChain(text).finally(() => {
+      sendingRef.current = false
+    })
+  }
+
+  const handleStop = () => {
+    orchestratorRef.current?.abort()
   }
 
   const buildMarkdown = useCallback(() => {
@@ -256,7 +181,7 @@ const MultiAgentChat: FC = () => {
     const lines = [`# ${activeConversation.name}`, '']
     for (const msg of messages) {
       const agent = agents.find((a) => a.id === msg.agentId)
-      const sender = msg.role === 'user' ? '用户' : msg.role === 'event' ? '系统' : agent?.name || 'Agent'
+      const sender = msg.role === 'user' ? '用户' : msg.role === 'system' ? '系统' : agent?.name || 'Agent'
       lines.push(`## ${sender} (${formatTime(msg.createdAt)})`, '', msg.content, '')
     }
     return lines.join('\n')
@@ -292,7 +217,7 @@ const MultiAgentChat: FC = () => {
       messages: messages.map((m) => {
         const agent = agents.find((a) => a.id === m.agentId)
         return {
-          sender: m.role === 'user' ? '用户' : m.role === 'event' ? '系统' : agent?.name,
+          sender: m.role === 'user' ? '用户' : m.role === 'system' ? '系统' : agent?.name,
           content: m.content,
           time: m.createdAt
         }
@@ -346,7 +271,7 @@ const MultiAgentChat: FC = () => {
         `- 负责人: ${agent?.name || '-'}`
       )
       if (t.description) lines.push(`- 描述: ${t.description}`)
-      if (t.dependsOn.length > 0) {
+      if (t.dependsOn?.length > 0) {
         const deps = t.dependsOn.map((d) => tasks.find((tt) => tt.id === d)?.title || d).join(', ')
         lines.push(`- 依赖: ${deps}`)
       }
@@ -381,6 +306,82 @@ const MultiAgentChat: FC = () => {
     }
   ]
 
+  const messagesAreaRef = useRef<HTMLDivElement>(null)
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null)
+  const [mentionPos, setMentionPos] = useState<{ top: number; left: number } | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const mentionableAgents = useMemo(() => {
+    if (!mentionQuery) return convAgents
+    const q = mentionQuery.toLowerCase()
+    return convAgents.filter((a) => a.name.toLowerCase().includes(q))
+  }, [convAgents, mentionQuery])
+
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value
+    setInput(val)
+    const selStart = e.target.selectionStart ?? val.length
+    const beforeCursor = val.slice(0, selStart)
+    const atMatch = beforeCursor.match(/@(\S*)$/)
+    if (atMatch) {
+      setMentionQuery(atMatch[1])
+      const rect = e.target.getBoundingClientRect()
+      setMentionPos({ top: rect.bottom + 4, left: rect.left + selStart * 8 })
+    } else {
+      setMentionQuery(null)
+      setMentionPos(null)
+    }
+  }, [])
+
+  const handleMentionSelect = useCallback(
+    (agent: { id: string; name: string }) => {
+      if (!mentionQuery && mentionQuery !== '') return
+      const selStart = inputRef.current?.selectionStart ?? input.length
+      const beforeCursor = input.slice(0, selStart)
+      const atIdx = beforeCursor.lastIndexOf('@')
+      if (atIdx === -1) return
+      const newInput = input.slice(0, atIdx) + `@${agent.name} ` + input.slice(selStart)
+      setInput(newInput)
+      setMentionQuery(null)
+      setMentionPos(null)
+      inputRef.current?.focus()
+    },
+    [input, mentionQuery]
+  )
+
+  const visibleMessages = filteredMessages.slice(-visibleCount)
+
+  const messageGroups = useMemo(() => {
+    const groups: { roundNumber: number; messages: WorkspaceMessage[] }[] = []
+    for (const msg of visibleMessages) {
+      const last = groups.length > 0 ? groups[groups.length - 1] : null
+      if (last && last.roundNumber === msg.roundNumber) {
+        last.messages.push(msg)
+      } else {
+        groups.push({ roundNumber: msg.roundNumber, messages: [msg] })
+      }
+    }
+    return groups
+  }, [visibleMessages])
+
+  const scrollToMessage = useCallback((msgId: string) => {
+    const el = document.getElementById(`msg-${msgId}`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      el.classList.add('msg-highlight')
+      setTimeout(() => el.classList.remove('msg-highlight'), 1500)
+    }
+  }, [])
+
+  const runningAgentNames = useMemo(
+    () =>
+      Object.entries(agentRunning)
+        .filter(([, r]) => r)
+        .map(([id]) => agents.find((a) => a.id === id)?.name)
+        .filter(Boolean),
+    [agentRunning, agents]
+  )
+
   if (!activeConversation) {
     return (
       <EmptyState>
@@ -390,8 +391,6 @@ const MultiAgentChat: FC = () => {
       </EmptyState>
     )
   }
-
-  const visibleMessages = messages.slice(-visibleCount)
 
   return (
     <Container>
@@ -412,6 +411,13 @@ const MultiAgentChat: FC = () => {
           })}
         </HeaderLeft>
         <HeaderRight>
+          <HeaderBtn
+            onClick={() => {
+              setIsSearchOpen(!isSearchOpen)
+              setSearchQuery('')
+            }}>
+            <Search size={14} />
+          </HeaderBtn>
           <span>{messages.length} 条消息</span>
           <Dropdown menu={{ items: moreMenuItems }} trigger={['click']}>
             <MoreBtn>
@@ -421,6 +427,30 @@ const MultiAgentChat: FC = () => {
         </HeaderRight>
       </ChatHeader>
 
+      {isSearchOpen && (
+        <SearchBar>
+          <Search size={14} style={{ flexShrink: 0 }} />
+          <SearchInput
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="搜索消息..."
+            autoFocus
+          />
+          {searchQuery && (
+            <SearchInfo>
+              {filteredMessages.length}/{messages.length}
+            </SearchInfo>
+          )}
+          <SearchClose
+            onClick={() => {
+              setIsSearchOpen(false)
+              setSearchQuery('')
+            }}>
+            <X size={14} />
+          </SearchClose>
+        </SearchBar>
+      )}
+
       {error && (
         <ErrorBar>
           <AlertTriangle size={14} />
@@ -429,7 +459,7 @@ const MultiAgentChat: FC = () => {
         </ErrorBar>
       )}
 
-      <MessagesArea>
+      <MessagesArea ref={messagesAreaRef}>
         {messages.length === 0 ? (
           <EmptyState>
             <EmptyIcon>WS</EmptyIcon>
@@ -438,20 +468,44 @@ const MultiAgentChat: FC = () => {
           </EmptyState>
         ) : (
           <MessageList>
-            {messages.length > visibleCount && (
-              <LoadMoreBtn onClick={() => setVisibleCount((c) => c + 50)}>
-                ↑ 加载更早消息（还有 {messages.length - visibleCount} 条）
-              </LoadMoreBtn>
+            {filteredMessages.length > visibleCount && (
+              <LoadMoreSentinel ref={loadMoreRef}>
+                <Loader2 size={12} className="spin" /> 加载中...
+              </LoadMoreSentinel>
             )}
-            {visibleMessages.map((msg) => (
-              <MessageBubble
-                key={msg.id}
-                msg={msg}
-                agents={agents}
-                allMessages={messages}
-                onReply={() => setReplyTo(msg.id)}
-              />
+            {searchQuery && filteredMessages.length === 0 && <NoResults>没有找到匹配的消息</NoResults>}
+            {messageGroups.map((group) => (
+              <React.Fragment key={`round-${group.roundNumber}-${group.messages[0]?.id}`}>
+                {group.roundNumber > 0 && (
+                  <RoundDivider>
+                    <RoundLine />
+                    <RoundLabel>Round {group.roundNumber}</RoundLabel>
+                    <RoundLine />
+                  </RoundDivider>
+                )}
+                {group.messages.map((msg) => (
+                  <MessageBubble
+                    key={msg.id}
+                    msg={msg}
+                    agents={agents}
+                    allMessages={messages}
+                    onReply={() => setReplyTo(msg.id)}
+                    onScrollToMessage={scrollToMessage}
+                    onTaskClick={() => dispatch(setRightPanel('tasks'))}
+                  />
+                ))}
+              </React.Fragment>
             ))}
+            {isRunning && runningAgentNames.length > 0 && (
+              <TypingIndicator>
+                <TypingDots>
+                  <TypingDot $delay={0} />
+                  <TypingDot $delay={0.2} />
+                  <TypingDot $delay={0.4} />
+                </TypingDots>
+                <TypingText>{runningAgentNames.join(', ')} 正在思考...</TypingText>
+              </TypingIndicator>
+            )}
             <div ref={messagesEndRef} />
           </MessageList>
         )}
@@ -465,7 +519,7 @@ const MultiAgentChat: FC = () => {
                 const orig = messages.find((m) => m.id === replyTo)
                 const agent = agents.find((a) => a.id === orig?.agentId)
                 return orig
-                  ? `${agent?.name || '你'}: ${orig.content.slice(0, 40)}${orig.content.length > 40 ? '...' : ''}`
+                  ? `${agent?.name || '你'}: ${(orig.content || '').slice(0, 40)}${(orig.content || '').length > 40 ? '...' : ''}`
                   : ''
               })()}
             </span>
@@ -474,21 +528,47 @@ const MultiAgentChat: FC = () => {
         )}
         <InputWrapper>
           <StyledInput
+            ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleInputChange}
             onKeyDown={(e) => {
+              if (mentionQuery !== null && e.key === 'Enter') {
+                if (mentionableAgents.length > 0) {
+                  e.preventDefault()
+                  handleMentionSelect(mentionableAgents[0])
+                  return
+                }
+                setMentionQuery(null)
+                setMentionPos(null)
+              }
+              if (e.key === 'Escape') {
+                setMentionQuery(null)
+                setMentionPos(null)
+                return
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
                 handleSend()
               }
             }}
-            placeholder={isRunning ? 'Agent 正在思考...' : '输入消息，Enter 发送...'}
+            placeholder={isRunning ? 'Agent 正在思考...' : '输入消息，@ 提及 Agent，Enter 发送...'}
             disabled={isRunning}
           />
-          <SendBtn onClick={handleSend} disabled={!input.trim() || isRunning}>
-            {isRunning ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
+          <SendBtn onClick={isRunning ? handleStop : handleSend} disabled={!isRunning && !input.trim()}>
+            {isRunning ? <Pause size={16} /> : <Send size={16} />}
           </SendBtn>
         </InputWrapper>
+        {mentionQuery !== null && mentionPos && mentionableAgents.length > 0 && (
+          <MentionPopover style={{ top: mentionPos.top, left: mentionPos.left }}>
+            {mentionableAgents.map((a) => (
+              <MentionItem key={a.id} onClick={() => handleMentionSelect(a)} onMouseDown={(e) => e.preventDefault()}>
+                <AgentAvatarTiny color={AGENT_COLOR_MAP[a.color] || '#1677ff'}>{a.avatar}</AgentAvatarTiny>
+                <span>{a.name}</span>
+                <span style={{ fontSize: 10, color: 'var(--color-text-secondary)', marginLeft: 'auto' }}>{a.role}</span>
+              </MentionItem>
+            ))}
+          </MentionPopover>
+        )}
       </InputArea>
     </Container>
   )
@@ -499,18 +579,24 @@ const MessageBubble: FC<{
   agents: { id: string; name: string; avatar: string; color: string; agentType: string }[]
   allMessages: WorkspaceMessage[]
   onReply: () => void
-}> = ({ msg, agents, allMessages, onReply }) => {
+  onScrollToMessage: (msgId: string) => void
+  onTaskClick?: () => void
+}> = ({ msg, agents, allMessages, onReply, onScrollToMessage, onTaskClick }) => {
   const agent = agents.find((a) => a.id === msg.agentId)
   const replyMsg = msg.replyTo ? allMessages.find((m) => m.id === msg.replyTo) : null
   const replyAgent = replyMsg ? agents.find((a) => a.id === replyMsg.agentId) : null
 
-  if (msg.role === 'event') {
+  if (msg.role === 'system') {
     if (msg.messageType === 'task_create' || msg.messageType === 'task_update') {
       const td = msg.taskData
       const taskAgent = agents.find((a) => a.id === td?.assignedTo)
       return (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
-          <TaskCardMessage>
+        <motion.div
+          id={`msg-${msg.id}`}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.3 }}>
+          <TaskCardMessage onClick={onTaskClick}>
             <TaskCardIcon>
               {msg.messageType === 'task_create' ? '📋' : STATUS_EMOJI[td?.status || 'queued']}
             </TaskCardIcon>
@@ -526,7 +612,7 @@ const MessageBubble: FC<{
       )
     }
     return (
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
+      <motion.div id={`msg-${msg.id}`} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
         <EventMessage>{msg.content}</EventMessage>
       </motion.div>
     )
@@ -534,13 +620,17 @@ const MessageBubble: FC<{
 
   if (msg.role === 'user') {
     return (
-      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>
+      <motion.div
+        id={`msg-${msg.id}`}
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2 }}>
         <UserBubble>
           {replyMsg && (
-            <QuotePreview>
-              回复 {replyAgent?.name || '你'}: {replyMsg.content.slice(0, 60)}
-              {replyMsg.content.length > 60 ? '...' : ''}
-            </QuotePreview>
+            <QuotePreviewClickable onClick={() => onScrollToMessage(replyMsg.id)}>
+              回复 {replyAgent?.name || '你'}: {(replyMsg.content || '').slice(0, 60)}
+              {(replyMsg.content || '').length > 60 ? '...' : ''}
+            </QuotePreviewClickable>
           )}
           <BubbleContent>{msg.content}</BubbleContent>
           <BubbleFooter>
@@ -554,7 +644,11 @@ const MessageBubble: FC<{
 
   if (msg.messageType === 'tool_call' || msg.messageType === 'tool_result') {
     return (
-      <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.2 }}>
+      <motion.div
+        id={`msg-${msg.id}`}
+        initial={{ opacity: 0, x: -10 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ duration: 0.2 }}>
         <AgentBubble>
           <AgentAvatarMedium color={AGENT_COLOR_MAP[agent?.color || 'blue'] || '#1677ff'}>
             {agent?.avatar || '?'}
@@ -573,7 +667,11 @@ const MessageBubble: FC<{
   }
 
   return (
-    <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.2 }}>
+    <motion.div
+      id={`msg-${msg.id}`}
+      initial={{ opacity: 0, x: -10 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.2 }}>
       <AgentBubble>
         <AgentAvatarMedium color={AGENT_COLOR_MAP[agent?.color || 'blue'] || '#1677ff'}>
           {agent?.avatar || '?'}
@@ -584,10 +682,10 @@ const MessageBubble: FC<{
             {agent?.agentType === 'code' && <CodeTag>Code</CodeTag>}
           </AgentNameRow>
           {replyMsg && (
-            <QuotePreview>
-              回复 {replyAgent?.name || '你'}: {replyMsg.content.slice(0, 60)}
-              {replyMsg.content.length > 60 ? '...' : ''}
-            </QuotePreview>
+            <QuotePreviewClickable onClick={() => onScrollToMessage(replyMsg.id)}>
+              回复 {replyAgent?.name || '你'}: {(replyMsg.content || '').slice(0, 60)}
+              {(replyMsg.content || '').length > 60 ? '...' : ''}
+            </QuotePreviewClickable>
           )}
           <AgentContent>
             <WorkspaceMarkdown content={msg.content} />
@@ -635,8 +733,22 @@ const Container = styled.div`
     to { transform: rotate(360deg); }
   }
 
+  @keyframes typing-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+
   .spin {
     animation: spin 1s linear infinite;
+  }
+
+  .msg-highlight {
+    animation: highlight-flash 1.5s ease-out;
+  }
+
+  @keyframes highlight-flash {
+    0% { background: color-mix(in srgb, var(--color-primary) 20%, transparent); }
+    100% { background: transparent; }
   }
 `
 
@@ -729,6 +841,64 @@ const MoreBtn = styled.button`
   }
 `
 
+const HeaderBtn = styled.button`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  &:hover {
+    background: var(--color-hover);
+    color: var(--color-text);
+  }
+`
+
+const SearchBar = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 0.5px solid var(--color-border);
+  background: var(--color-background-soft);
+`
+
+const SearchInput = styled.input`
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 12px;
+  outline: none;
+  &::placeholder {
+    color: var(--color-text-secondary);
+  }
+`
+
+const SearchInfo = styled.span`
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+`
+
+const SearchClose = styled.button`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 2px;
+  &:hover {
+    color: var(--color-text);
+  }
+`
+
 const ErrorBar = styled.div`
   display: flex;
   align-items: center;
@@ -756,20 +926,21 @@ const MessagesArea = styled.div`
   scroll-behavior: smooth;
 `
 
-const LoadMoreBtn = styled.button`
-  display: block;
-  margin: 0 auto 12px;
-  padding: 6px 16px;
-  border: 0.5px solid var(--color-border);
-  border-radius: 16px;
-  background: var(--color-background-soft);
+const LoadMoreSentinel = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px;
+  font-size: 11px;
   color: var(--color-text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  &:hover {
-    color: var(--color-primary);
-    border-color: var(--color-primary);
-  }
+`
+
+const NoResults = styled.div`
+  text-align: center;
+  padding: 40px 0;
+  font-size: 13px;
+  color: var(--color-text-secondary);
 `
 
 const MessageList = styled.div`
@@ -799,6 +970,11 @@ const TaskCardMessage = styled.div`
   border-radius: 10px;
   margin: 0 auto;
   max-width: 380px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  &:hover {
+    border-color: var(--color-primary);
+  }
 `
 
 const TaskCardIcon = styled.span`
@@ -931,7 +1107,7 @@ const ToolLabel = styled.span`
   font-weight: 500;
 `
 
-const QuotePreview = styled.div`
+const QuotePreviewClickable = styled.div`
   font-size: 11px;
   color: var(--color-text-secondary);
   padding: 4px 8px;
@@ -942,6 +1118,99 @@ const QuotePreview = styled.div`
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 0.15s;
+  &:hover {
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  }
+`
+
+const RoundDivider = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+`
+
+const RoundLine = styled.div`
+  flex: 1;
+  height: 0.5px;
+  background: var(--color-border);
+`
+
+const RoundLabel = styled.span`
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  padding: 2px 8px;
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  border-radius: 10px;
+`
+
+const TypingIndicator = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+`
+
+const TypingDots = styled.div`
+  display: flex;
+  gap: 3px;
+`
+
+const TypingDot = styled.div<{ $delay: number }>`
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  opacity: 0.6;
+  animation: typing-bounce 1.2s ease-in-out infinite;
+  animation-delay: ${({ $delay }) => $delay}s;
+`
+
+const TypingText = styled.span`
+  font-size: 11px;
+  color: var(--color-text-secondary);
+`
+
+const MentionPopover = styled.div`
+  position: absolute;
+  z-index: 100;
+  min-width: 200px;
+  max-height: 180px;
+  overflow-y: auto;
+  background: var(--color-background);
+  border: 0.5px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+`
+
+const MentionItem = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  &:hover {
+    background: var(--color-hover);
+  }
+`
+
+const AgentAvatarTiny = styled.div<{ color: string }>`
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  font-weight: 700;
+  color: ${({ color }) => color};
+  background: ${({ color }) => color}18;
+  flex-shrink: 0;
 `
 
 const BubbleContent = styled.div`
@@ -1021,6 +1290,7 @@ const ReplyClose = styled.button`
 `
 
 const InputArea = styled.div`
+  position: relative;
   padding: 12px 16px;
   border-top: 0.5px solid var(--color-border);
   flex-shrink: 0;
@@ -1069,7 +1339,6 @@ const SendBtn = styled.button`
     opacity: 0.9;
   }
 `
-
 const EmptyState = styled.div`
   display: flex;
   flex-direction: column;

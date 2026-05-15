@@ -54,16 +54,26 @@ async function runChatAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   const sdkMessages = buildMessages({ ...opts, userMessage })
 
   let fullText = ''
-  await fetchChatCompletion({
-    messages: sdkMessages,
-    assistant,
-    onChunkReceived: (chunk: Chunk) => {
-      if (chunk.type === ChunkType.TEXT_DELTA) {
-        fullText = chunk.text
-        opts.onChunk?.(fullText)
+  try {
+    await fetchChatCompletion({
+      messages: sdkMessages,
+      assistant,
+      onChunkReceived: (chunk: Chunk) => {
+        if (chunk.type === ChunkType.TEXT_DELTA) {
+          fullText = chunk.text
+          opts.onChunk?.(fullText)
+        } else if (chunk.type === ChunkType.ERROR) {
+          const errMsg = chunk.error?.message || '未知错误'
+          fullText = `⚠️ 请求失败: ${errMsg}`
+          opts.onChunk?.(fullText)
+        }
       }
-    }
-  })
+    })
+  } catch (err: any) {
+    const errMsg = err?.message || String(err)
+    fullText = `⚠️ 请求失败: ${errMsg}`
+    opts.onChunk?.(fullText)
+  }
 
   const tasks = extractTasks(fullText, opts.agents)
 
@@ -267,7 +277,7 @@ function buildMessages(opts: AgentRunOptions) {
   for (const msg of opts.conversationHistory.slice(-20)) {
     if (msg.role === 'user') {
       messages.push({ role: 'user', content: msg.content })
-    } else if (msg.role === 'agent') {
+    } else if (msg.role === 'assistant') {
       const agent = opts.agents.find((a) => a.id === msg.agentId)
       messages.push({ role: 'assistant', content: `[${agent?.name || 'Agent'}] ${msg.content}` })
     }
